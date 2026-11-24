@@ -890,10 +890,11 @@ function New-TarjetaAccion {
     # La tarjeta usa una casilla; aquí se cambia por un botón
     $fila = $t.Casilla.Parent
     $fila.Children.Remove($t.Casilla)
-    $titulo = New-Object System.Windows.Controls.TextBlock
-    $titulo.Text = $Titulo
-    $titulo.FontWeight = "SemiBold"
-    $titulo.VerticalAlignment = "Center"
+    # Ojo: PowerShell no distingue mayúsculas; $titulo pisaría el parámetro $Titulo
+    $txtTitulo = New-Object System.Windows.Controls.TextBlock
+    $txtTitulo.Text = $Titulo
+    $txtTitulo.FontWeight = "SemiBold"
+    $txtTitulo.VerticalAlignment = "Center"
     $boton = New-Object System.Windows.Controls.Button
     $boton.Content = $TextoBoton
     $boton.Padding = "12,4"
@@ -903,7 +904,7 @@ function New-TarjetaAccion {
     $boton.Add_Click($Accion)
     [System.Windows.Controls.DockPanel]::SetDock($boton, "Right")
     $fila.Children.Insert(0, $boton)
-    [void]$fila.Children.Add($titulo)
+    [void]$fila.Children.Add($txtTitulo)
     if (-not $Permitido -and $Motivo) {
         $nota = New-Object System.Windows.Controls.TextBlock
         $nota.Text = $Motivo
