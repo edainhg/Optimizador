@@ -2625,7 +2625,7 @@ New-TarjetaAccion -Panel $pR -Titulo "Liberar RAM ahora" -TextoBoton "Liberar" -
     -Aviso "El efecto es temporal: los programas vuelven a tomar memoria cuando los usas." -Accion { Invoke-AccionAnalisis "LiberarRAM" }
 
 New-TarjetaAccion -Panel $pR -Titulo "Programas abiertos que más RAM usan" -TextoBoton "Ver lista" -Riesgo "Bajo" `
-    -Descripcion "Muestra los programas de tu sesión que más memoria ocupan, con un botón para cerrar cada uno." `
+    -Descripcion "Muestra los programas que más memoria ocupan, qué es cada uno, qué pasa si lo cierras y un botón para cerrarlo." `
     -Aviso "Al cerrar un programa se pierde lo que no esté guardado en él." -Accion { Update-ListaProcesos }
 $script:PanelProcesos = New-Object System.Windows.Controls.StackPanel
 $script:PanelProcesos.Margin = "0,0,0,8"
@@ -2676,6 +2676,78 @@ $script:Protegidos = @(
     "Claude", "claude", "LockApp", "SearchApp", "SearchIndexer", "smartscreen", "PhoneExperienceHost"
 )
 
+# Qué es cada programa conocido y qué pasa si lo cierras.
+# Consejo: "Cerrar" (se puede cerrar sin problema), "Cuidado" (se puede, pero algo deja de funcionar), "No" (mejor no cerrarlo)
+$script:ProgramasConocidos = @{
+    "msedgewebview2"        = @{ Nombre = "Microsoft Edge WebView2"; Que = "Motor de Edge que usan por dentro otras apps: Widgets, Teams, Outlook nuevo, WhatsApp, Logitech Options+ y muchas más. Cada app abre el suyo, por eso ocupa tanto."; Consejo = "Cuidado"; Efecto = "Las apps que lo usan pueden quedarse en blanco o cerrarse. Mejor cierra esas apps." }
+    "WhatsApp.Root"         = @{ Nombre = "WhatsApp"; Que = "WhatsApp de escritorio, que sigue abierto en segundo plano para avisarte de mensajes."; Consejo = "Cerrar"; Efecto = "Dejarás de recibir avisos de WhatsApp en la PC hasta que lo abras." }
+    "WhatsApp"              = @{ Nombre = "WhatsApp"; Que = "WhatsApp de escritorio."; Consejo = "Cerrar"; Efecto = "Dejarás de recibir avisos de WhatsApp en la PC hasta que lo abras." }
+    "logioptionsplus_agent" = @{ Nombre = "Logitech Options+"; Que = "Programa de Logitech que da funciones a los botones extra del mouse o teclado."; Consejo = "Cuidado"; Efecto = "Los botones personalizados y gestos del mouse/teclado Logitech dejan de funcionar hasta reiniciar." }
+    "ShellHost"             = @{ Nombre = "Shell de Windows"; Que = "Parte de Windows 11: dibuja la barra de tareas, Acciones rápidas y el área de notificaciones."; Consejo = "No"; Efecto = "La barra de tareas y el panel de Wi-Fi/volumen pueden dejar de responder." }
+    "CrossDeviceResume"     = @{ Nombre = "Continuar desde el móvil (Windows)"; Que = "Función de Windows 11 para seguir en la PC lo que hacías en el teléfono."; Consejo = "Cerrar"; Efecto = "Ninguno si no usas 'Vincular móvil'. Windows lo vuelve a abrir si hace falta." }
+    "RustDesk"              = @{ Nombre = "RustDesk"; Que = "Programa de escritorio remoto (para que alguien se conecte a esta PC o tú a otra)."; Consejo = "Cuidado"; Efecto = "Nadie podrá conectarse a esta PC por RustDesk hasta que lo abras de nuevo." }
+    "chrome"                = @{ Nombre = "Google Chrome"; Que = "Navegador. Cada pestaña y extensión es un proceso aparte; aquí se suman todos."; Consejo = "Cerrar"; Efecto = "Se cierran todas las ventanas de Chrome. Al abrirlo puedes recuperar las pestañas." }
+    "msedge"                = @{ Nombre = "Microsoft Edge"; Que = "Navegador. Cada pestaña y extensión es un proceso aparte."; Consejo = "Cerrar"; Efecto = "Se cierran todas las ventanas de Edge." }
+    "firefox"               = @{ Nombre = "Firefox"; Que = "Navegador."; Consejo = "Cerrar"; Efecto = "Se cierran todas las ventanas de Firefox." }
+    "opera"                 = @{ Nombre = "Opera"; Que = "Navegador."; Consejo = "Cerrar"; Efecto = "Se cierran todas las ventanas de Opera." }
+    "Teams"                 = @{ Nombre = "Microsoft Teams"; Que = "Chat y reuniones de Microsoft."; Consejo = "Cerrar"; Efecto = "No recibirás mensajes ni llamadas de Teams hasta abrirlo." }
+    "ms-teams"              = @{ Nombre = "Microsoft Teams"; Que = "Chat y reuniones de Microsoft."; Consejo = "Cerrar"; Efecto = "No recibirás mensajes ni llamadas de Teams hasta abrirlo." }
+    "OneDrive"              = @{ Nombre = "OneDrive"; Que = "Sincroniza tus archivos con la nube de Microsoft."; Consejo = "Cuidado"; Efecto = "Los archivos dejan de subirse a la nube hasta que lo abras." }
+    "Spotify"               = @{ Nombre = "Spotify"; Que = "Música."; Consejo = "Cerrar"; Efecto = "Se para la música." }
+    "Discord"               = @{ Nombre = "Discord"; Que = "Chat y voz."; Consejo = "Cerrar"; Efecto = "Sales de las llamadas y no recibes mensajes." }
+    "Code"                  = @{ Nombre = "Visual Studio Code"; Que = "Editor de código."; Consejo = "Cuidado"; Efecto = "Guarda tus archivos antes de cerrarlo." }
+    "Photoshop"             = @{ Nombre = "Adobe Photoshop"; Que = "Editor de imágenes."; Consejo = "Cuidado"; Efecto = "Guarda tu trabajo antes: lo no guardado se pierde." }
+    "Illustrator"           = @{ Nombre = "Adobe Illustrator"; Que = "Editor de diseño."; Consejo = "Cuidado"; Efecto = "Guarda tu trabajo antes: lo no guardado se pierde." }
+    "AdobeCollabSync"       = @{ Nombre = "Adobe Acrobat (sincronización)"; Que = "Sincroniza documentos de Acrobat en segundo plano."; Consejo = "Cerrar"; Efecto = "Ninguno importante." }
+    "Creative Cloud"        = @{ Nombre = "Adobe Creative Cloud"; Que = "Gestor de apps y fuentes de Adobe."; Consejo = "Cuidado"; Efecto = "Las fuentes de Adobe sincronizadas pueden dejar de verse en tus programas." }
+    "PhoneExperienceHost"   = @{ Nombre = "Vincular móvil"; Que = "Conecta tu teléfono con Windows (mensajes, llamadas, fotos)."; Consejo = "Cerrar"; Efecto = "No verás notificaciones del teléfono en la PC hasta abrirlo." }
+    "Widgets"               = @{ Nombre = "Widgets de Windows"; Que = "Panel de noticias y tiempo."; Consejo = "Cerrar"; Efecto = "Ninguno; se vuelve a abrir si pulsas el botón de Widgets." }
+    "WidgetService"         = @{ Nombre = "Widgets de Windows"; Que = "Servicio del panel de noticias y tiempo."; Consejo = "Cerrar"; Efecto = "Ninguno; se vuelve a abrir si pulsas el botón de Widgets." }
+    "steam"                 = @{ Nombre = "Steam"; Que = "Tienda de juegos."; Consejo = "Cerrar"; Efecto = "No se descargan actualizaciones de juegos mientras esté cerrado." }
+    "EpicGamesLauncher"     = @{ Nombre = "Epic Games"; Que = "Tienda de juegos."; Consejo = "Cerrar"; Efecto = "Ninguno importante." }
+    "AnyDesk"               = @{ Nombre = "AnyDesk"; Que = "Escritorio remoto."; Consejo = "Cuidado"; Efecto = "Nadie podrá conectarse a esta PC por AnyDesk." }
+    "TeamViewer"            = @{ Nombre = "TeamViewer"; Que = "Escritorio remoto."; Consejo = "Cuidado"; Efecto = "Nadie podrá conectarse a esta PC por TeamViewer." }
+    "Zoom"                  = @{ Nombre = "Zoom"; Que = "Videollamadas."; Consejo = "Cerrar"; Efecto = "Sales de la reunión si estás en una." }
+    "OUTLOOK"               = @{ Nombre = "Outlook"; Que = "Correo."; Consejo = "Cuidado"; Efecto = "Dejas de recibir correos hasta abrirlo. Guarda los borradores." }
+    "olk"                   = @{ Nombre = "Outlook (nuevo)"; Que = "Correo."; Consejo = "Cuidado"; Efecto = "Dejas de recibir avisos de correo hasta abrirlo." }
+    "WINWORD"               = @{ Nombre = "Word"; Que = "Documentos."; Consejo = "Cuidado"; Efecto = "Guarda antes: lo no guardado se pierde." }
+    "EXCEL"                 = @{ Nombre = "Excel"; Que = "Hojas de cálculo."; Consejo = "Cuidado"; Efecto = "Guarda antes: lo no guardado se pierde." }
+    "POWERPNT"              = @{ Nombre = "PowerPoint"; Que = "Presentaciones."; Consejo = "Cuidado"; Efecto = "Guarda antes: lo no guardado se pierde." }
+    "Docker Desktop"        = @{ Nombre = "Docker Desktop"; Que = "Contenedores para desarrollo."; Consejo = "Cuidado"; Efecto = "Se detienen los contenedores que tengas corriendo." }
+    "vmmem"                 = @{ Nombre = "Máquina virtual (WSL / Docker)"; Que = "Memoria de WSL o Docker."; Consejo = "Cuidado"; Efecto = "Se apagan WSL y Docker. Mejor ciérralos desde su programa." }
+    "mysqld"                = @{ Nombre = "Servidor MySQL"; Que = "Base de datos."; Consejo = "Cuidado"; Efecto = "Las apps que usan esa base de datos dejan de funcionar." }
+    "sqlservr"              = @{ Nombre = "SQL Server"; Que = "Base de datos."; Consejo = "Cuidado"; Efecto = "Las apps que usan esa base de datos dejan de funcionar." }
+    "node"                  = @{ Nombre = "Node.js"; Que = "Programa o servidor de desarrollo en JavaScript."; Consejo = "Cuidado"; Efecto = "Se detiene ese servidor o herramienta." }
+    "php"                   = @{ Nombre = "PHP"; Que = "Servidor o script de PHP (por ejemplo, un proyecto Laravel)."; Consejo = "Cuidado"; Efecto = "Se detiene ese servidor." }
+}
+
+function Get-InfoPrograma($Grupo) {
+    $conocido = $script:ProgramasConocidos[[string]$Grupo.Proc]
+    $ruta = ""; $desc = ""; $empresa = ""
+    foreach ($p in $Grupo.Procesos) {
+        try {
+            if ($p.Path) {
+                $ruta = $p.Path
+                $vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($ruta)
+                $desc = ([string]$vi.FileDescription).Trim()
+                $empresa = ([string]$vi.CompanyName).Trim()
+                break
+            }
+        } catch { }
+    }
+    $deWindows = $ruta -and $ruta.StartsWith($env:SystemRoot, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($conocido) {
+        return [pscustomobject]@{ Nombre = $conocido.Nombre; Que = $conocido.Que; Consejo = $conocido.Consejo; Efecto = $conocido.Efecto; Empresa = $empresa; Ruta = $ruta; DeWindows = $deWindows }
+    }
+    $nombreBonito = if ($desc) { $desc } else { $Grupo.Proc }
+    if ($deWindows) {
+        return [pscustomobject]@{ Nombre = $nombreBonito; Que = "Componente de Windows."; Consejo = "No"; Efecto = "Puede fallar alguna función de Windows; se vuelve a abrir solo."; Empresa = $empresa; Ruta = $ruta; DeWindows = $true }
+    }
+    $de = if ($empresa) { "Programa de $empresa." } else { "Programa sin descripción del fabricante." }
+    $efecto = if ($Grupo.Abierta) { "Se cierra su ventana; guarda antes lo que tengas abierto." } else { "Si es de un programa que no usas ahora, cerrarlo no causa problemas. Si no lo reconoces, búscalo en Internet." }
+    return [pscustomobject]@{ Nombre = $nombreBonito; Que = $de; Consejo = "Cuidado"; Efecto = $efecto; Empresa = $empresa; Ruta = $ruta; DeWindows = $false }
+}
+
 function Update-ListaProcesos {
     $script:PanelProcesos.Children.Clear()
     $sesion = (Get-Process -Id $PID).SessionId
@@ -2686,9 +2758,16 @@ function Update-ListaProcesos {
                 Proc = $_.Name
                 MB = [math]::Round((($_.Group | Measure-Object WorkingSet64 -Sum).Sum) / 1MB)
                 Ids = @($_.Group | ForEach-Object { $_.Id })
+                Procesos = @($_.Group)
                 Abierta = if ($ventanaAbierta.Count) { $ventanaAbierta[0].MainWindowTitle } else { "" }
             }
         } | Where-Object { $_.MB -ge 50 } | Sort-Object MB -Descending | Select-Object -First 15)
+    $leyenda = New-Object System.Windows.Controls.TextBlock
+    $leyenda.TextWrapping = "Wrap"
+    $leyenda.Foreground = Get-Pincel "#6B7280"
+    $leyenda.Margin = "16,0,0,6"
+    $leyenda.Text = "Verde: se puede cerrar sin problema.  Naranja: se puede, pero algo deja de funcionar (lee el aviso).  Rojo: parte de Windows, mejor no cerrarlo. Lo que cierres se vuelve a abrir al reiniciar si está en el arranque."
+    [void]$script:PanelProcesos.Children.Add($leyenda)
     if ($grupos.Count -eq 0) {
         $vacio = New-Object System.Windows.Controls.TextBlock
         $vacio.Text = "No hay programas grandes abiertos."
@@ -2696,39 +2775,76 @@ function Update-ListaProcesos {
         [void]$script:PanelProcesos.Children.Add($vacio)
         return
     }
+    $colores = @{
+        Cerrar  = @{ Color = "#16A34A"; Texto = "Se puede cerrar" }
+        Cuidado = @{ Color = "#D97706"; Texto = "Cerrar con cuidado" }
+        No      = @{ Color = "#DC2626"; Texto = "Mejor no cerrarlo" }
+    }
     foreach ($g in $grupos) {
+        $info = Get-InfoPrograma $g
+        $col = $colores[$info.Consejo]
         $marco = New-Object System.Windows.Controls.Border
         $marco.Background = Get-Pincel "#FFFFFF"
-        $marco.BorderBrush = Get-Pincel "#E2E6EC"
-        $marco.BorderThickness = 1
+        $marco.BorderBrush = Get-Pincel $col.Color
+        $marco.BorderThickness = "4,1,1,1"
         $marco.CornerRadius = 6
-        $marco.Padding = "12,6"
-        $marco.Margin = "16,0,0,4"
+        $marco.Padding = "12,8"
+        $marco.Margin = "16,0,0,6"
         $fila = New-Object System.Windows.Controls.DockPanel
         $btn = New-Object System.Windows.Controls.Button
         $btn.Content = "Cerrar"
         $btn.Padding = "12,3"
-        $btn.Tag = $g
+        $btn.Margin = "10,0,0,0"
+        $btn.VerticalAlignment = "Center"
+        $btn.Tag = [pscustomobject]@{ Grupo = $g; Info = $info }
         $btn.Add_Click({
             param($origen, $e)
-            $p = $origen.Tag
-            $msg = "¿Cerrar $($p.Proc)?`r`n`r`nLo que no esté guardado en ese programa se pierde."
-            if ([System.Windows.MessageBox]::Show($msg, "Cerrar programa", "YesNo", "Warning") -ne "Yes") { return }
+            $p = $origen.Tag.Grupo
+            $inf = $origen.Tag.Info
+            $icono = if ($inf.Consejo -eq "Cerrar") { "Question" } else { "Warning" }
+            $msg = "¿Cerrar $($inf.Nombre) ($($p.Proc))?`r`n`r`nQué pasa: $($inf.Efecto)`r`n`r`nLo que no esté guardado en ese programa se pierde."
+            if ($inf.Consejo -eq "No") { $msg = "$([char]0x26A0) Es parte de Windows. Cerrarlo no ahorra RAM de verdad: Windows lo vuelve a abrir.`r`n`r`n" + $msg }
+            if ([System.Windows.MessageBox]::Show($msg, "Cerrar programa", "YesNo", $icono) -ne "Yes") { return }
             foreach ($id in $p.Ids) { try { [void](Get-Process -Id $id -ErrorAction Stop).CloseMainWindow() } catch { } }
             Start-Sleep -Milliseconds 1200
             foreach ($id in $p.Ids) { try { Stop-Process -Id $id -Force -ErrorAction Stop } catch { } }
-            Escribir-Log "Cerrado: $($p.Proc) ($($p.MB) MB)"
+            Escribir-Log "Cerrado: $($inf.Nombre) ($($p.Proc), $($p.MB) MB)"
             Update-ListaProcesos
             Update-IndicadorRam
         })
         [System.Windows.Controls.DockPanel]::SetDock($btn, "Right")
         [void]$fila.Children.Add($btn)
-        $txt = New-Object System.Windows.Controls.TextBlock
-        $txt.VerticalAlignment = "Center"
-        $txt.TextTrimming = "CharacterEllipsis"
+        $pila = New-Object System.Windows.Controls.StackPanel
+        $cab = New-Object System.Windows.Controls.TextBlock
+        $cab.TextWrapping = "Wrap"
         $mbTxt = if ($g.MB -ge 1024) { "{0:N1} GB" -f ($g.MB / 1024) } else { "$($g.MB) MB" }
-        $txt.Text = "$($g.Proc)   $mbTxt" + $(if ($g.Abierta) { "   ($($g.Abierta))" } else { "   (en segundo plano)" })
-        [void]$fila.Children.Add($txt)
+        $run1 = New-Object System.Windows.Documents.Run ($info.Nombre)
+        $run1.FontWeight = "SemiBold"
+        [void]$cab.Inlines.Add($run1)
+        $run2 = New-Object System.Windows.Documents.Run ("   $mbTxt   ·   " + $(if ($g.Abierta) { "ventana abierta: $($g.Abierta)" } else { "en segundo plano" }))
+        $run2.Foreground = Get-Pincel "#6B7280"
+        [void]$cab.Inlines.Add($run2)
+        [void]$pila.Children.Add($cab)
+        $que = New-Object System.Windows.Controls.TextBlock
+        $que.TextWrapping = "Wrap"
+        $que.Foreground = Get-Pincel "#374151"
+        $que.Margin = "0,2,0,0"
+        $que.Text = $info.Que
+        [void]$pila.Children.Add($que)
+        $consejo = New-Object System.Windows.Controls.TextBlock
+        $consejo.TextWrapping = "Wrap"
+        $consejo.Foreground = Get-Pincel $col.Color
+        $consejo.Margin = "0,2,0,0"
+        $consejo.Text = "$($col.Texto): $($info.Efecto)"
+        [void]$pila.Children.Add($consejo)
+        $tec = New-Object System.Windows.Controls.TextBlock
+        $tec.TextWrapping = "Wrap"
+        $tec.Foreground = Get-Pincel "#9CA3AF"
+        $tec.FontSize = 11
+        $tec.Margin = "0,2,0,0"
+        $tec.Text = "Proceso: $($g.Proc).exe ($($g.Ids.Count) proceso(s))" + $(if ($info.Ruta) { "   ·   $($info.Ruta)" } else { "" })
+        [void]$pila.Children.Add($tec)
+        [void]$fila.Children.Add($pila)
         $marco.Child = $fila
         [void]$script:PanelProcesos.Children.Add($marco)
     }
