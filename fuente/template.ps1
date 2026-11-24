@@ -1,0 +1,2051 @@
+#Requires -Version 5.1
+<#
+    OptimizadorES - Optimizador de Windows en español con avisos de riesgo
+
+    Basado en WinUtil de Chris Titus Tech (https://github.com/ChrisTitusTech/winutil),
+    publicado bajo licencia MIT:
+
+        MIT License
+        Copyright (c) 2022 CT Tech Group LLC
+
+        Permission is hereby granted, free of charge, to any person obtaining a copy
+        of this software and associated documentation files (the "Software"), to deal
+        in the Software without restriction, including without limitation the rights
+        to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+        copies of the Software, and to permit persons to whom the Software is
+        furnished to do so, subject to the following conditions:
+
+        The above copyright notice and this permission notice shall be included in all
+        copies or substantial portions of the Software.
+
+        THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+        IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+        FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+        AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+        LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+        OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+        SOFTWARE.
+
+    Los ajustes (claves de registro, servicios y scripts) provienen de config/tweaks.json
+    de WinUtil. Los textos en español, los niveles de riesgo y la interfaz son propios.
+
+    Uso: clic derecho > "Ejecutar con PowerShell", o bien:
+        powershell -NoProfile -ExecutionPolicy Bypass -File .\OptimizadorES.ps1
+#>
+
+# -Prueba: carga todo (datos, motor e interfaz) sin pedir permisos ni mostrar la ventana.
+# Lo usan las pruebas automáticas (tests/OptimizadorES.Tests.ps1).
+param([switch]$Prueba)
+
+# ---------------------------------------------------------------- Permisos de administrador
+$identidad = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identidad)
+if (-not $Prueba -and -not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "Pidiendo permisos de administrador..."
+    Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", "`"$PSCommandPath`""
+    )
+    exit
+}
+
+if (-not $Prueba -and $PSVersionTable.PSVersion.Major -ge 6) {
+    # Checkpoint-Computer y WPF necesitan Windows PowerShell 5.1
+    Start-Process -FilePath "powershell.exe" -ArgumentList @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", "`"$PSCommandPath`""
+    )
+    exit
+}
+
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+$script:RutaScript = $PSCommandPath
+$script:IconoPng = '__ICONO_PNG__'
+$script:IconoIco = '__ICONO_ICO__'
+
+function New-ImagenB64 {
+    param([string]$Base64)
+    if (-not $Base64) { return $null }
+    try {
+        $ms = New-Object System.IO.MemoryStream (, [Convert]::FromBase64String($Base64))
+        $img = [Windows.Media.Imaging.BitmapFrame]::Create($ms, [Windows.Media.Imaging.BitmapCreateOptions]::None, [Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+        $img.Freeze()
+        return $img
+    } catch { return $null }
+}
+
+# ---------------------------------------------------------------- Datos
+$DatosB64 = '__DATOS_B64__'
+$script:Ajustes = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($DatosB64)) | ConvertFrom-Json
+
+$CarpetaLog = Join-Path $env:LOCALAPPDATA "OptimizadorES"
+New-Item -ItemType Directory -Force -Path $CarpetaLog | Out-Null
+$global:ArchivoLog = Join-Path $CarpetaLog ("registro_{0:yyyyMMdd_HHmmss}.log" -f (Get-Date))
+
+$global:Estado = [hashtable]::Synchronized(@{
+    Cola     = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
+    Progreso = 0
+    Texto    = ""
+    Apps     = [hashtable]::Synchronized(@{})
+})
+
+# ---------------------------------------------------------------- Motor
+# Se carga en la ventana principal y también en el hilo de trabajo.
+$script:MotorCodigo = @'
+$global:sync = @{}
+
+function Escribir-Log {
+    param([string]$Mensaje, [string]$Nivel = "INFO")
+    $linea = "{0:HH:mm:ss} [{1}] {2}" -f (Get-Date), $Nivel, $Mensaje
+    if ($global:Estado) { $global:Estado.Cola.Enqueue($linea) }
+    if ($global:ArchivoLog) {
+        try { Add-Content -Path $global:ArchivoLog -Value $linea -Encoding UTF8 } catch { }
+    }
+}
+
+# Funciones con el nombre de WinUtil, porque algunos scripts de ajustes las llaman
+function Write-WinUtilLog {
+    param($Level = "INFO", $Component = "", $Message = "")
+    Escribir-Log -Mensaje "$Component $Message" -Nivel $Level
+}
+function Invoke-WinutilThemeChange { param($theme) }
+function Invoke-WinUtilExplorerUpdate {
+    param([string]$action = "refresh")
+    if ($action -eq "restart") {
+        taskkill.exe /F /IM explorer.exe | Out-Null
+        Start-Process explorer.exe
+        return
+    }
+    if (-not ("OptES.Win32" -as [type])) {
+        Add-Type -Namespace OptES -Name Win32 -MemberDefinition @"
+[DllImport("user32.dll", CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+"@
+    }
+    $resultado = [IntPtr]::Zero
+    [void][OptES.Win32]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [IntPtr]::Zero, "ImmersiveColorSet", 2, 100, [ref]$resultado)
+}
+
+function Initialize-HKU {
+    if (-not (Get-PSDrive -Name HKU -ErrorAction SilentlyContinue)) {
+        New-PSDrive -PSProvider Registry -Name HKU -Root HKEY_USERS | Out-Null
+    }
+}
+
+function Set-Registro {
+    param($Ruta, $Nombre, $Tipo, $Valor)
+    try {
+        Initialize-HKU
+        if ($Valor -eq "<RemoveEntry>") {
+            $existe = $false
+            if (Test-Path $Ruta) {
+                $existe = $null -ne (Get-ItemProperty -Path $Ruta -Name $Nombre -ErrorAction SilentlyContinue)
+            }
+            if (-not $existe) { return $true }
+            Remove-ItemProperty -Path $Ruta -Name $Nombre -Force -ErrorAction Stop
+            Escribir-Log "Registro: eliminado $Ruta\$Nombre"
+            return $true
+        }
+        if (-not (Test-Path $Ruta)) {
+            New-Item -Path $Ruta -Force -ErrorAction Stop | Out-Null
+        }
+        Set-ItemProperty -Path $Ruta -Name $Nombre -Type $Tipo -Value $Valor -Force -ErrorAction Stop
+        Escribir-Log "Registro: $Ruta\$Nombre = $Valor"
+        return $true
+    } catch {
+        Escribir-Log "No se pudo cambiar $Ruta\$Nombre ($($_.Exception.Message))" "ERROR"
+        return $false
+    }
+}
+
+function Set-Servicio {
+    param($Nombre, $Inicio, $Esperado)
+    try {
+        $servicio = Get-Service -Name $Nombre -ErrorAction Stop
+    } catch {
+        Escribir-Log "Servicio $Nombre no existe en este equipo; se omite." "AVISO"
+        return $true
+    }
+    # Igual que WinUtil: si alguien ya cambió el servicio a mano, se respeta
+    if ($Esperado -and ([string]$servicio.StartType -ne [string]$Esperado)) {
+        Escribir-Log "Servicio ${Nombre}: está en $($servicio.StartType) (no en $Esperado); se deja como está." "AVISO"
+        return $true
+    }
+    if ([string]$servicio.StartType -eq [string]$Inicio) { return $true }
+    try {
+        if ($Inicio -eq "AutomaticDelayedStart") {
+            sc.exe config $Nombre start= delayed-auto | Out-Null
+        } else {
+            $servicio | Set-Service -StartupType $Inicio -ErrorAction Stop
+        }
+        Escribir-Log "Servicio ${Nombre}: inicio $Inicio"
+        return $true
+    } catch {
+        Escribir-Log "No se pudo cambiar el servicio ${Nombre}: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
+# ----- Respaldo del estado real antes de cada ajuste (para "Deshacer" exacto)
+function Get-RutaRespaldo { return (Join-Path $env:LOCALAPPDATA "OptimizadorES\respaldo-ajustes.json") }
+
+function Read-Respaldo {
+    $ruta = Get-RutaRespaldo
+    $h = @{}
+    if (Test-Path -LiteralPath $ruta) {
+        try {
+            $o = Get-Content -LiteralPath $ruta -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($p in $o.PSObject.Properties) { $h[$p.Name] = $p.Value }
+        } catch {
+            Escribir-Log "El archivo de respaldo está dañado; se ignora ($ruta)." "AVISO"
+        }
+    }
+    return $h
+}
+
+function Save-Respaldo {
+    param([hashtable]$Datos)
+    $ruta = Get-RutaRespaldo
+    New-Item -ItemType Directory -Force -Path (Split-Path $ruta) | Out-Null
+    $temporal = "$ruta.tmp"
+    ConvertTo-Json -InputObject $Datos -Depth 8 | Set-Content -LiteralPath $temporal -Encoding UTF8
+    Move-Item -LiteralPath $temporal -Destination $ruta -Force
+}
+
+function Get-EstadoActual {
+    param($Item)
+    Initialize-HKU
+    $regs = foreach ($r in @($Item.registry)) {
+        if (-not $r) { continue }
+        $existe = $false; $valor = $null; $tipo = $null
+        try {
+            if (Test-Path -LiteralPath $r.Path) {
+                $clave = Get-Item -LiteralPath $r.Path -ErrorAction Stop
+                if ($clave.GetValueNames() -contains $r.Name) {
+                    $existe = $true
+                    $valor = $clave.GetValue($r.Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    $tipo = [string]$clave.GetValueKind($r.Name)
+                    if ($valor -is [byte[]]) { $valor = [Convert]::ToBase64String($valor) }
+                }
+            }
+        } catch { }
+        [pscustomobject]@{ Path = $r.Path; Name = $r.Name; Existe = $existe; Valor = $valor; Tipo = $tipo }
+    }
+    $svcs = foreach ($s in @($Item.service)) {
+        if (-not $s) { continue }
+        $sv = Get-Service -Name $s.Name -ErrorAction SilentlyContinue
+        if ($sv) { [pscustomobject]@{ Name = $s.Name; StartType = [string]$sv.StartType } }
+    }
+    return [pscustomobject]@{ Fecha = (Get-Date).ToString("s"); Nombre = $Item.Nombre; Registro = @($regs); Servicios = @($svcs) }
+}
+
+function Restore-EstadoGuardado {
+    param($Guardado)
+    $ok = $true
+    foreach ($r in @($Guardado.Registro)) {
+        if (-not $r) { continue }
+        if ($r.Existe) {
+            $v = $r.Valor
+            if ($r.Tipo -eq "Binary") { $v = [Convert]::FromBase64String([string]$r.Valor) }
+            elseif ($r.Tipo -eq "MultiString") { $v = [string[]]@($r.Valor) }
+            if (-not (Set-Registro -Ruta $r.Path -Nombre $r.Name -Tipo $r.Tipo -Valor $v)) { $ok = $false }
+        } else {
+            if (-not (Set-Registro -Ruta $r.Path -Nombre $r.Name -Tipo "String" -Valor "<RemoveEntry>")) { $ok = $false }
+        }
+    }
+    foreach ($s in @($Guardado.Servicios)) {
+        if (-not $s) { continue }
+        if (-not (Set-Servicio -Nombre $s.Name -Inicio $s.StartType)) { $ok = $false }
+    }
+    return $ok
+}
+
+function Invoke-Ajuste {
+    param($Item, [bool]$Deshacer = $false)
+    $accion = if ($Deshacer) { "Deshaciendo" } else { "Aplicando" }
+    Escribir-Log "----- ${accion}: $($Item.Nombre)"
+    $ok = $true
+    $global:avisos = 0
+
+    # Respaldo: al aplicar se guarda cómo estaba el equipo; al deshacer se restaura exacto
+    $guardado = $null
+    $respaldo = $null
+    $tieneDatos = (@($Item.registry | Where-Object { $_ }).Count + @($Item.service | Where-Object { $_ }).Count) -gt 0
+    if ($Item.Grupo -and $tieneDatos) {
+        $respaldo = Read-Respaldo
+        if ($Deshacer) {
+            $guardado = $respaldo[[string]$Item.Key]
+            if (-not $guardado) {
+                Escribir-Log "No hay respaldo de este ajuste (se aplicó antes o con otra herramienta): se vuelve a los valores de fábrica de Windows."
+            }
+        } elseif (-not $respaldo.ContainsKey([string]$Item.Key)) {
+            try {
+                $respaldo[[string]$Item.Key] = Get-EstadoActual -Item $Item
+                Save-Respaldo -Datos $respaldo
+                Escribir-Log "Respaldo guardado de cómo estaba el equipo."
+            } catch {
+                Escribir-Log "No se pudo guardar el respaldo: $($_.Exception.Message). Por seguridad no se aplica este ajuste." "ERROR"
+                return $false
+            }
+        }
+    }
+
+    foreach ($s in @($Item.service)) {
+        if ($guardado) { break }
+        if (-not $s) { continue }
+        if ($Deshacer) {
+            if (-not (Set-Servicio -Nombre $s.Name -Inicio $s.OriginalType -Esperado $s.StartupType)) { $ok = $false }
+        } else {
+            if (-not (Set-Servicio -Nombre $s.Name -Inicio $s.StartupType -Esperado $s.OriginalType)) { $ok = $false }
+        }
+    }
+
+    foreach ($r in @($Item.registry)) {
+        if ($guardado) { break }
+        if (-not $r) { continue }
+        $valor = if ($Deshacer) { $r.OriginalValue } else { $r.Value }
+        if (-not (Set-Registro -Ruta $r.Path -Nombre $r.Name -Tipo $r.Type -Valor $valor)) { $ok = $false }
+    }
+
+    $scripts = if ($Deshacer) { @($Item.UndoScript) } else { @($Item.InvokeScript) }
+    foreach ($codigo in $scripts) {
+        if (-not $codigo) { continue }
+        try {
+            $bloque = [scriptblock]::Create($codigo)
+            & $bloque 3>&1 6>&1 2>&1 | ForEach-Object {
+                # Solo se anotan mensajes; los objetos que devuelven los comandos se omiten
+                if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                    $global:avisos++
+                    Escribir-Log ($_.Exception.Message.Trim()) "AVISO"
+                } elseif ($_ -is [System.Management.Automation.WarningRecord]) {
+                    $global:avisos++
+                    Escribir-Log ($_.Message.Trim()) "AVISO"
+                } elseif ($_ -is [string] -or $_ -is [System.Management.Automation.InformationRecord]) {
+                    $texto = ([string]$_).Trim()
+                    if ($texto) { Escribir-Log $texto }
+                }
+            }
+        } catch {
+            Escribir-Log "Error en el script: $($_.Exception.Message)" "ERROR"
+            $ok = $false
+        }
+    }
+
+    if ($guardado) {
+        # Después del script de deshacer, se dejan los valores exactos que había antes
+        if (Restore-EstadoGuardado -Guardado $guardado) {
+            $respaldo.Remove([string]$Item.Key)
+            Save-Respaldo -Datos $respaldo
+            Escribir-Log "Restaurado el valor exacto que tenía el equipo antes ($($guardado.Fecha))."
+        } else {
+            $ok = $false
+        }
+    }
+
+    if ($ok -and $global:avisos) { Escribir-Log "Listo con avisos: $($Item.Nombre) (revisa las líneas AVISO de arriba)" "AVISO" }
+    elseif ($ok) { Escribir-Log "Listo: $($Item.Nombre)" } else { Escribir-Log "Terminado con errores: $($Item.Nombre)" "ERROR" }
+    return $ok
+}
+
+function Set-EstadoApp {
+    param([string]$Id, [string]$Texto, [string]$Tipo = "info", [int]$Progreso = -1)
+    if (-not $Id -or -not $global:Estado.Apps) { return }
+    $global:Estado.Apps[$Id] = @{ Texto = $Texto; Tipo = $Tipo; Progreso = $Progreso }
+}
+
+function Get-RutaWinget {
+    $c = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if ($c) { return $c.Source }
+    return $null
+}
+
+function Invoke-WingetEnVivo {
+    # Ejecuta winget leyendo su salida carácter a carácter para ver el progreso de descarga
+    param([string[]]$Argumentos, [string]$Id = "", [string]$Fase = "")
+    $ruta = Get-RutaWinget
+    if (-not $ruta) { throw "winget no está disponible. Usa Reparaciones > Reparar winget." }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $ruta
+    $psi.Arguments = ($Argumentos | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join " "
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $proceso = [Diagnostics.Process]::Start($psi)
+    $tareaError = $proceso.StandardError.ReadToEndAsync()
+    $buffer = New-Object System.Text.StringBuilder
+    $ultima = ""
+    $descargando = $false
+    while ($true) {
+        $n = $proceso.StandardOutput.Read()
+        $fin = ($n -lt 0)
+        $c = if ($fin) { [char]10 } else { [char]$n }
+        if ($c -eq [char]13 -or $c -eq [char]10) {
+            $t = $buffer.ToString().Trim()
+            [void]$buffer.Clear()
+            if ($t) {
+                $m = [regex]::Match($t, '([\d.,]+)\s*(KB|MB|GB)\s*/\s*([\d.,]+)\s*(KB|MB|GB)')
+                $p = [regex]::Match($t, '(\d{1,3})\s*%')
+                if ($m.Success) {
+                    $mult = @{ KB = 1KB; MB = 1MB; GB = 1GB }
+                    $hecho = [double]($m.Groups[1].Value -replace ',', '.') * $mult[$m.Groups[2].Value]
+                    $total = [double]($m.Groups[3].Value -replace ',', '.') * $mult[$m.Groups[4].Value]
+                    $pct = if ($total -gt 0) { [int](100 * $hecho / $total) } else { 0 }
+                    $descargando = $true
+                    Set-EstadoApp -Id $Id -Texto ("Descargando {0} {1} de {2} {3}" -f $m.Groups[1].Value, $m.Groups[2].Value, $m.Groups[3].Value, $m.Groups[4].Value) -Tipo "trabajo" -Progreso $pct
+                } elseif ($p.Success -and $t -match '[▀-▟]') {
+                    Set-EstadoApp -Id $Id -Texto "$Fase $($p.Groups[1].Value)%" -Tipo "trabajo" -Progreso ([int]$p.Groups[1].Value)
+                } elseif ($t -notmatch '[▀-▟]' -and $t -notmatch '^[-\\|/\s]+$') {
+                    if ($descargando -and $Fase -ne "Desinstalando") {
+                        $descargando = $false
+                        Set-EstadoApp -Id $Id -Texto "Instalando..." -Tipo "trabajo" -Progreso 100
+                    }
+                    if ($t -ne $ultima) { Escribir-Log "   $t"; $ultima = $t }
+                }
+            }
+        } else {
+            [void]$buffer.Append($c)
+        }
+        if ($fin) { break }
+    }
+    $proceso.WaitForExit()
+    $err = $tareaError.Result
+    if ($err -and $err.Trim()) { Escribir-Log ("   " + $err.Trim()) "AVISO" }
+    return $proceso.ExitCode
+}
+
+function Invoke-AppWinget {
+    param([string]$Accion, [string]$Id = "", [string]$Fuente = "winget")
+    $comunes = @("--accept-source-agreements", "--disable-interactivity")
+    switch ($Accion) {
+        "install"    { $argumentos = @("install", "--id", $Id, "--exact", "--source", $Fuente, "--accept-package-agreements", "--silent") + $comunes; $fase = "Instalando" }
+        "upgrade"    { $argumentos = @("upgrade", "--id", $Id, "--exact", "--source", $Fuente, "--accept-package-agreements", "--silent") + $comunes; $fase = "Actualizando" }
+        "uninstall"  { $argumentos = @("uninstall", "--id", $Id, "--exact", "--silent") + $comunes; $fase = "Desinstalando" }
+        "upgradeall" { $argumentos = @("upgrade", "--all", "--accept-package-agreements", "--silent") + $comunes; $fase = "Actualizando" }
+    }
+    Set-EstadoApp -Id $Id -Texto "$fase..." -Tipo "trabajo" -Progreso 0
+    try {
+        $codigo = Invoke-WingetEnVivo -Argumentos $argumentos -Id $Id -Fase $fase
+    } catch {
+        Set-EstadoApp -Id $Id -Texto "Error: $($_.Exception.Message)" -Tipo "error"
+        throw
+    }
+    $hecho = if ($Accion -eq "uninstall") { "No instalada" } else { "Instalada $([char]0x2714)" }
+    $tipoHecho = if ($Accion -eq "uninstall") { "info" } else { "ok" }
+    switch ($codigo) {
+        0           { Escribir-Log "Hecho."; Set-EstadoApp -Id $Id -Texto $hecho -Tipo $tipoHecho }
+        -1978335189 { Escribir-Log "Ya está en la última versión."; Set-EstadoApp -Id $Id -Texto "Instalada $([char]0x2714) (al día)" -Tipo "ok" }
+        -1978335135 { Escribir-Log "Ya estaba instalada."; Set-EstadoApp -Id $Id -Texto "Instalada $([char]0x2714)" -Tipo "ok" }
+        -1978334967 { Escribir-Log "Hecho. Necesita reiniciar el equipo para terminar." "AVISO"; Set-EstadoApp -Id $Id -Texto "$hecho (reinicia el equipo)" -Tipo "ok" }
+        -1978335212 {
+            Set-EstadoApp -Id $Id -Texto "No encontrada" -Tipo "error"
+            throw "winget no encontró esta app (o no está instalada, si era para actualizar o desinstalar)."
+        }
+        default {
+            Set-EstadoApp -Id $Id -Texto ("Error 0x{0:X8} (ver registro)" -f $codigo) -Tipo "error"
+            throw ("winget terminó con el código 0x{0:X8}." -f $codigo)
+        }
+    }
+}
+
+function Get-EstadoApps {
+    # Marca qué apps de la lista están instaladas y cuáles tienen actualización
+    param([string[]]$Ids)
+    if (-not (Get-RutaWinget)) { Escribir-Log "winget no está disponible; no se puede comprobar qué apps hay instaladas." "AVISO"; return }
+    foreach ($i in $Ids) { Set-EstadoApp -Id $i -Texto "Comprobando..." -Tipo "trabajo" }
+    Write-Output "Comprobando qué apps están instaladas (puede tardar un minuto)..."
+    $archivo = Join-Path $env:TEMP ("winget_export_{0}.json" -f [guid]::NewGuid())
+    $instaladas = @{}
+    try {
+        $null = Invoke-WingetEnVivo -Argumentos @("export", "-o", $archivo, "--accept-source-agreements", "--disable-interactivity")
+        if (Test-Path $archivo) {
+            $datos = Get-Content -Path $archivo -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($origen in @($datos.Sources)) {
+                foreach ($pkg in @($origen.Packages)) { $instaladas[[string]$pkg.PackageIdentifier] = $true }
+            }
+        }
+    } finally {
+        Remove-Item -Path $archivo -Force -ErrorAction SilentlyContinue
+    }
+    $ruta = Get-RutaWinget
+    $textoUpgrade = (& $ruta upgrade --accept-source-agreements --disable-interactivity 2>&1 | Out-String)
+    $cuenta = 0
+    $conUpdate = 0
+    foreach ($i in $Ids) {
+        $tieneUpdate = $textoUpgrade -match ("(?<![\w.+-])" + [regex]::Escape($i) + "(?![\w.+-])")
+        if ($instaladas.ContainsKey($i) -or $tieneUpdate) {
+            $cuenta++
+            if ($tieneUpdate) {
+                $conUpdate++
+                Set-EstadoApp -Id $i -Texto "Instalada - hay actualización" -Tipo "update"
+            } else {
+                Set-EstadoApp -Id $i -Texto "Instalada $([char]0x2714)" -Tipo "ok"
+            }
+        } else {
+            Set-EstadoApp -Id $i -Texto "" -Tipo "info"
+        }
+    }
+    Write-Output "De esta lista tienes $cuenta app(s) instalada(s); $conUpdate con actualización disponible."
+}
+
+function Get-EstadoToggle {
+    param($Item)
+    Initialize-HKU
+    foreach ($r in @($Item.registry)) {
+        if (-not $r) { continue }
+        $actual = $null
+        if (Test-Path $r.Path) {
+            $actual = (Get-ItemProperty -Path $r.Path -ErrorAction SilentlyContinue).($r.Name)
+        }
+        if ($null -eq $actual) {
+            switch ([string]$r.DefaultState) {
+                "true"  { $actual = $r.Value }
+                "false" { $actual = $r.OriginalValue }
+            }
+        }
+        if ([string]$actual -ne [string]$r.Value) { return $false }
+    }
+    return $true
+}
+'@
+
+. ([scriptblock]::Create($script:MotorCodigo))
+
+# ---------------------------------------------------------------- Interfaz
+$xaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Optimizador de Windows (en español)" Width="1040" Height="760"
+        MinWidth="760" MinHeight="560" WindowStartupLocation="CenterScreen"
+        Background="#F4F5F7" FontFamily="Segoe UI" FontSize="13">
+  <Grid Margin="16">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="140"/>
+    </Grid.RowDefinitions>
+
+    <DockPanel Grid.Row="0" Margin="0,0,0,12">
+    <Image x:Name="ImgLogo" DockPanel.Dock="Left" Width="44" Height="44" Margin="0,0,12,0" VerticalAlignment="Top"/>
+    <StackPanel>
+      <TextBlock Text="Optimizador de Windows" FontSize="24" FontWeight="SemiBold" Foreground="#1F2937"/>
+      <TextBlock TextWrapping="Wrap" Foreground="#4B5563" Margin="0,4,0,0"
+                 Text="Marca los ajustes que quieras y pulsa Aplicar. Cada opción indica su nivel de riesgo y qué puede dejar de funcionar. Siempre se crea primero un punto de restauración."/>
+    </StackPanel>
+    </DockPanel>
+
+    <TabControl Grid.Row="1" x:Name="Pestanas" Background="White" Padding="0">
+      <TabItem Header="  Ajustes  ">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelAjustes" Margin="12"/>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="  Preferencias  ">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="12">
+            <TextBlock TextWrapping="Wrap" Foreground="#4B5563" Margin="0,0,0,10"
+                       Text="Las casillas muestran cómo está tu Windows ahora. Cambia las que quieras y pulsa 'Aplicar preferencias'. Solo se tocan las que cambies."/>
+            <StackPanel x:Name="PanelPreferencias"/>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="  Apps  ">
+        <DockPanel>
+          <WrapPanel DockPanel.Dock="Top" Margin="12,10,12,4">
+            <TextBlock Text="Buscar:" VerticalAlignment="Center" Margin="0,0,6,4"/>
+            <TextBox x:Name="TxtBuscarApp" Width="200" Padding="4,3" Margin="0,0,12,4"/>
+            <Button x:Name="BtnAppsInstalar" Content="Instalar seleccionadas" Padding="12,5" Margin="0,0,6,4" Background="#2563EB" Foreground="White" FontWeight="SemiBold"/>
+            <Button x:Name="BtnAppsActualizar" Content="Actualizar seleccionadas" Padding="12,5" Margin="0,0,6,4"/>
+            <Button x:Name="BtnAppsDesinstalar" Content="Desinstalar seleccionadas" Padding="12,5" Margin="0,0,6,4"/>
+            <Button x:Name="BtnAppsTodo" Content="Actualizar TODAS las apps del equipo" Padding="12,5" Margin="0,0,6,4"/>
+            <Button x:Name="BtnAppsLimpiar" Content="Quitar selección" Padding="12,5" Margin="0,0,6,4"/>
+            <Button x:Name="BtnAppsComprobar" Content="Comprobar instaladas" Padding="12,5" Margin="0,0,6,4"/>
+            <Button x:Name="BtnAppsActualizables" Content="Marcar las que tienen actualización" Padding="12,5" Margin="0,0,6,4"/>
+            <Button x:Name="BtnAppsPanel" Content="Otros programas instalados" Padding="12,5" Margin="0,0,6,4"/>
+          </WrapPanel>
+          <TextBlock x:Name="TxtWinget" DockPanel.Dock="Top" Margin="12,0,12,6" TextWrapping="Wrap" Foreground="#4B5563"/>
+          <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel x:Name="PanelApps" Margin="12,0,12,12"/>
+          </ScrollViewer>
+        </DockPanel>
+      </TabItem>
+      <TabItem Header="  Configuración  ">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelConfig" Margin="12"/>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="  Seguridad  ">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelSeguridad" Margin="12"/>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="  Reparaciones  ">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelReparaciones" Margin="12"/>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="  Informe del equipo  ">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelInforme" Margin="12"/>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="  Riesgos y ayuda  ">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelAyuda" Margin="16"/>
+        </ScrollViewer>
+      </TabItem>
+    </TabControl>
+
+    <Grid Grid.Row="2" Margin="0,12,0,8">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <WrapPanel Grid.Column="0" x:Name="BotonesAjustes" VerticalAlignment="Center">
+        <Button x:Name="BtnRecomendados" Content="Seleccionar recomendados (riesgo bajo)" Padding="12,6" Margin="0,0,8,4"/>
+        <Button x:Name="BtnPresetEstandar" Content="Preset Estándar" Padding="12,6" Margin="0,0,8,4" ToolTip="Mismo preset 'Standard' de WinUtil"/>
+        <Button x:Name="BtnPresetMinimo" Content="Preset Mínimo" Padding="12,6" Margin="0,0,8,4" ToolTip="Mismo preset 'Minimal' de WinUtil"/>
+        <Button x:Name="BtnLimpiar" Content="Quitar selección" Padding="12,6" Margin="0,0,8,4"/>
+        <Button x:Name="BtnDeshacer" Content="Deshacer seleccionados" Padding="12,6" Margin="0,0,8,4"/>
+        <Button x:Name="BtnRestaurar" Content="Abrir Restaurar sistema" Padding="12,6" Margin="0,0,8,4"/>
+        <Button x:Name="BtnExportar" Content="Exportar selección" Padding="12,6" Margin="0,0,8,4"/>
+        <Button x:Name="BtnImportar" Content="Importar selección" Padding="12,6" Margin="0,0,8,4"/>
+      </WrapPanel>
+      <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+        <Button x:Name="BtnPreferencias" Content="Aplicar preferencias" Padding="14,6" Margin="0,0,8,4"/>
+        <Button x:Name="BtnAplicar" Content="Aplicar seleccionados" Padding="18,6" Margin="0,0,0,4"
+                Background="#2563EB" Foreground="White" FontWeight="SemiBold" BorderBrush="#1D4ED8"/>
+      </StackPanel>
+    </Grid>
+
+    <Grid Grid.Row="3">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+      </Grid.RowDefinitions>
+      <DockPanel Grid.Row="0" Margin="0,0,0,4">
+        <TextBlock x:Name="TxtEstado" DockPanel.Dock="Left" Foreground="#374151" Text="Listo."/>
+        <ProgressBar x:Name="Barra" Height="8" Margin="12,0,0,0" Minimum="0" Maximum="100" Value="0"/>
+      </DockPanel>
+      <TextBox x:Name="TxtLog" Grid.Row="1" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
+               VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+               Background="#111827" Foreground="#E5E7EB" BorderThickness="0" Padding="8"/>
+    </Grid>
+  </Grid>
+</Window>
+'@
+
+$lector = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
+$script:Ventana = [Windows.Markup.XamlReader]::Load($lector)
+$ui = @{}
+foreach ($n in "PanelAjustes","PanelPreferencias","PanelAyuda","PanelSeguridad","PanelApps","TxtBuscarApp","BtnAppsInstalar","BtnAppsActualizar","BtnAppsDesinstalar","BtnAppsTodo","BtnAppsLimpiar","BtnAppsComprobar","BtnAppsActualizables","BtnAppsPanel","TxtWinget","PanelReparaciones","PanelInforme","PanelConfig","BtnPresetEstandar","BtnPresetMinimo","BtnExportar","BtnImportar","BtnRecomendados","BtnLimpiar","BtnDeshacer","BtnRestaurar","BtnPreferencias","BtnAplicar","TxtEstado","Barra","TxtLog","Pestanas","ImgLogo") {
+    $ui[$n] = $script:Ventana.FindName($n)
+}
+$script:UI = $ui
+$logo = New-ImagenB64 $script:IconoPng
+if ($logo) { $script:Ventana.Icon = $logo; $ui.ImgLogo.Source = $logo }
+
+$script:TarjetaPorId = @{}
+$script:HechosSesion = @{}
+$script:InfoAjuste = @{}
+$script:Colores = @{
+    Bajo  = @{ Fondo = "#E7F6EC"; Texto = "#1E7B3A"; Etiqueta = "Riesgo bajo" }
+    Medio = @{ Fondo = "#FFF4E0"; Texto = "#A85F00"; Etiqueta = "Riesgo medio" }
+    Alto  = @{ Fondo = "#FDE8E8"; Texto = "#B42318"; Etiqueta = "Riesgo ALTO" }
+}
+$conversor = New-Object System.Windows.Media.BrushConverter
+function Get-Pincel([string]$hex) { return $conversor.ConvertFromString($hex) }
+
+function New-Tarjeta {
+    param($Item, [bool]$Marcado)
+    $color = $script:Colores[$Item.Riesgo]
+
+    $borde = New-Object System.Windows.Controls.Border
+    $borde.Background = Get-Pincel "#FFFFFF"
+    $borde.BorderBrush = Get-Pincel "#E5E7EB"
+    $borde.BorderThickness = 1
+    $borde.CornerRadius = 6
+    $borde.Padding = "12,8"
+    $borde.Margin = "0,0,0,6"
+
+    $pila = New-Object System.Windows.Controls.StackPanel
+
+    $fila = New-Object System.Windows.Controls.DockPanel
+    $etiqueta = New-Object System.Windows.Controls.Border
+    $etiqueta.Background = Get-Pincel $color.Fondo
+    $etiqueta.CornerRadius = 10
+    $etiqueta.Padding = "8,1"
+    $etiqueta.Margin = "8,0,0,0"
+    $etiqueta.VerticalAlignment = "Center"
+    $txtEtiqueta = New-Object System.Windows.Controls.TextBlock
+    $txtEtiqueta.Text = $color.Etiqueta
+    $txtEtiqueta.Foreground = Get-Pincel $color.Texto
+    $txtEtiqueta.FontSize = 11
+    $txtEtiqueta.FontWeight = "SemiBold"
+    $etiqueta.Child = $txtEtiqueta
+    [System.Windows.Controls.DockPanel]::SetDock($etiqueta, "Right")
+    [void]$fila.Children.Add($etiqueta)
+
+    $casilla = New-Object System.Windows.Controls.CheckBox
+    $casilla.Content = $Item.Nombre
+    $casilla.FontWeight = "SemiBold"
+    $casilla.VerticalContentAlignment = "Center"
+    $casilla.IsChecked = $Marcado
+    $casilla.Tag = $Item
+    [void]$fila.Children.Add($casilla)
+    [void]$pila.Children.Add($fila)
+
+    $desc = New-Object System.Windows.Controls.TextBlock
+    $desc.Text = $Item.Descripcion
+    $desc.TextWrapping = "Wrap"
+    $desc.Foreground = Get-Pincel "#4B5563"
+    $desc.Margin = "20,2,0,0"
+    [void]$pila.Children.Add($desc)
+
+    if ($Item.Aviso) {
+        $aviso = New-Object System.Windows.Controls.TextBlock
+        $aviso.Text = "$([char]0x26A0) $($Item.Aviso)"
+        $aviso.TextWrapping = "Wrap"
+        $aviso.Foreground = Get-Pincel $color.Texto
+        $aviso.Margin = "20,3,0,0"
+        [void]$pila.Children.Add($aviso)
+    }
+
+    $estadoTxt = New-Object System.Windows.Controls.TextBlock
+    $estadoTxt.FontWeight = "SemiBold"
+    $estadoTxt.Margin = "20,4,0,0"
+    $estadoTxt.Visibility = "Collapsed"
+    [void]$pila.Children.Add($estadoTxt)
+    $barraT = New-Object System.Windows.Controls.ProgressBar
+    $barraT.Height = 5
+    $barraT.Minimum = 0
+    $barraT.Maximum = 100
+    $barraT.Margin = "20,3,0,2"
+    $barraT.Visibility = "Collapsed"
+    [void]$pila.Children.Add($barraT)
+    $borde.Child = $pila
+    return @{ Borde = $borde; Casilla = $casilla; Estado = $estadoTxt; Barra = $barraT }
+}
+
+function New-Titulo {
+    param([string]$Texto, [string]$Subtitulo)
+    $p = New-Object System.Windows.Controls.StackPanel
+    $p.Margin = "0,8,0,8"
+    $t = New-Object System.Windows.Controls.TextBlock
+    $t.Text = $Texto
+    $t.FontSize = 17
+    $t.FontWeight = "SemiBold"
+    $t.Foreground = Get-Pincel "#111827"
+    [void]$p.Children.Add($t)
+    if ($Subtitulo) {
+        $s = New-Object System.Windows.Controls.TextBlock
+        $s.Text = $Subtitulo
+        $s.TextWrapping = "Wrap"
+        $s.Foreground = Get-Pincel "#6B7280"
+        [void]$p.Children.Add($s)
+    }
+    return $p
+}
+
+# Pestaña Ajustes
+$script:CasillasAjustes = @()
+$grupos = @(
+    @{ Nombre = "Esenciales"; Titulo = "Ajustes esenciales"; Sub = "Seguros para la mayoría de los equipos. Lee igualmente los avisos de riesgo medio." },
+    @{ Nombre = "Avanzados";  Titulo = "$([char]0x26A0) Ajustes avanzados (úsalos con precaución)"; Sub = "Pueden romper funciones, programas o la seguridad del equipo. Márcalos solo si entiendes el aviso." }
+)
+foreach ($g in $grupos) {
+    [void]$ui.PanelAjustes.Children.Add((New-Titulo $g.Titulo $g.Sub))
+    foreach ($item in ($script:Ajustes | Where-Object { $_.Grupo -eq $g.Nombre })) {
+        $marcado = ($item.Key -eq "WPFTweaksRestorePoint")
+        $t = New-Tarjeta -Item $item -Marcado $marcado
+        [void]$ui.PanelAjustes.Children.Add($t.Borde)
+        $script:CasillasAjustes += $t.Casilla
+        $script:InfoAjuste[$item.Key] = $t
+    }
+}
+
+# Pestaña Preferencias
+$script:CasillasPref = @()
+function Update-Preferencias {
+    foreach ($c in $script:CasillasPref) {
+        $estado = $false
+        try { $estado = Get-EstadoToggle -Item $c.Tag } catch { }
+        $c.IsChecked = $estado
+        $c.Uid = [string]$estado   # estado inicial, para saber qué cambió
+    }
+}
+foreach ($item in ($script:Ajustes | Where-Object { $_.Grupo -eq "Preferencias" })) {
+    $t = New-Tarjeta -Item $item -Marcado $false
+    [void]$ui.PanelPreferencias.Children.Add($t.Borde)
+    $script:CasillasPref += $t.Casilla
+}
+Update-Preferencias
+
+# Pestaña Ayuda
+$textosAyuda = @(
+    @("Qué significa cada nivel de riesgo", ""),
+    @("Riesgo bajo", "Cambios de privacidad, limpieza o apariencia. Fáciles de deshacer y no rompen nada importante."),
+    @("Riesgo medio", "Pueden desactivar alguna función que quizá uses (ubicación, notificaciones, búsqueda rápida, Xbox, compartir Internet...). Lee el aviso."),
+    @("Riesgo ALTO", "Desinstalan componentes, quitan protección (cifrado, avisos de seguridad) o pueden romper la red o programas. Algunos no se pueden deshacer del todo."),
+    @("Cómo volver atrás", "1) Marca el ajuste y pulsa 'Deshacer seleccionados'. 2) Si algo va mal, usa 'Abrir Restaurar sistema' y elige el punto 'OptimizadorES'. Las desinstalaciones (Edge, OneDrive, IA) no se revierten con 'Deshacer': hay que reinstalar."),
+    @("Registro", "Todo lo que hace la herramienta se guarda en: " + $global:ArchivoLog),
+    @("Créditos", "Ajustes técnicos basados en WinUtil de Chris Titus Tech (github.com/ChrisTitusTech/winutil), licencia MIT. Traducción, niveles de riesgo e interfaz: OptimizadorES. Se usa bajo tu responsabilidad, sin garantía.")
+)
+foreach ($par in $textosAyuda) {
+    if (-not $par[1]) { [void]$ui.PanelAyuda.Children.Add((New-Titulo $par[0] "")); continue }
+    $tb = New-Object System.Windows.Controls.TextBlock
+    $tb.TextWrapping = "Wrap"
+    $tb.Margin = "0,0,0,10"
+    $negrita = New-Object System.Windows.Documents.Run ($par[0] + ": ")
+    $negrita.FontWeight = "SemiBold"
+    switch ($par[0]) {
+        "Riesgo bajo"  { $negrita.Foreground = Get-Pincel $script:Colores.Bajo.Texto }
+        "Riesgo medio" { $negrita.Foreground = Get-Pincel $script:Colores.Medio.Texto }
+        "Riesgo ALTO"  { $negrita.Foreground = Get-Pincel $script:Colores.Alto.Texto }
+    }
+    [void]$tb.Inlines.Add($negrita)
+    [void]$tb.Inlines.Add((New-Object System.Windows.Documents.Run $par[1]))
+    [void]$ui.PanelAyuda.Children.Add($tb)
+}
+
+# ---------------------------------------------------------------- Pestaña Seguridad
+$script:BotonesSeguridad = @()
+
+function Get-InfoAntivirus {
+    $productos = @()
+    try { $productos = @(Get-CimInstance -Namespace "root/SecurityCenter2" -ClassName AntiVirusProduct -ErrorAction Stop) } catch { }
+    foreach ($p in $productos) {
+        $hex = "{0:X6}" -f [int]$p.productState
+        [pscustomobject]@{
+            Nombre = $p.displayName
+            Activo = @("10", "11") -contains $hex.Substring(2, 2)
+            AlDia  = ($hex.Substring(4, 2) -eq "00")
+        }
+    }
+}
+
+function Get-ModoDefender {
+    try { return [string](Get-MpComputerStatus -ErrorAction Stop).AMRunningMode } catch { return "No disponible" }
+}
+
+$script:codigoDefender = @'
+param($Tipo)
+Write-Output "Actualizando las firmas de Defender..."
+try { Update-MpSignature -ErrorAction Stop } catch { Write-Warning "No se pudieron actualizar las firmas: $($_.Exception.Message)" }
+Write-Output "Analizando ($Tipo). No cierres la ventana; puede tardar bastante..."
+$inicio = Get-Date
+Start-MpScan -ScanType $Tipo -ErrorAction Stop
+$nuevas = @(Get-MpThreatDetection -ErrorAction SilentlyContinue | Where-Object { $_.InitialDetectionTime -ge $inicio })
+if ($nuevas.Count -eq 0) {
+    Write-Output "Análisis terminado: no se encontraron amenazas."
+} else {
+    foreach ($d in $nuevas) {
+        $nombre = (Get-MpThreat -ThreatID $d.ThreatID -ErrorAction SilentlyContinue).ThreatName
+        Write-Warning "Amenaza encontrada: $nombre en $(@($d.Resources) -join ', ')"
+    }
+    Write-Warning "Revisa y elimina las amenazas en Seguridad de Windows > Protección contra virus y amenazas > Historial de protección."
+}
+'@
+
+$script:codigoSafetyScanner = @'
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+$ProgressPreference = "SilentlyContinue"
+$url = if ([Environment]::Is64BitOperatingSystem) { "https://go.microsoft.com/fwlink/?LinkId=212732" } else { "https://go.microsoft.com/fwlink/?LinkId=212733" }
+$destino = Join-Path $env:LOCALAPPDATA "OptimizadorES\msert.exe"
+Write-Output "Descargando Microsoft Safety Scanner desde Microsoft (unos 200 MB, puede tardar)..."
+Invoke-WebRequest -Uri $url -OutFile $destino -UseBasicParsing -ErrorAction Stop
+$firma = Get-AuthenticodeSignature -FilePath $destino
+if ($firma.Status -ne "Valid" -or $firma.SignerCertificate.Subject -notmatch "O=Microsoft Corporation") {
+    Remove-Item -Path $destino -Force -ErrorAction SilentlyContinue
+    throw "El archivo descargado no tiene una firma válida de Microsoft; se borró por seguridad."
+}
+Write-Output "Descarga verificada (firmada por Microsoft). Se abre el asistente: elige 'Análisis rápido' o 'Análisis completo'."
+Start-Process -FilePath $destino
+Write-Output "Cuando termine, el informe queda en C:\Windows\debug\msert.log"
+'@
+
+$script:codigoReparar = @'
+Write-Output "Paso 1 de 2: DISM revisa la imagen de Windows (10 a 30 minutos)..."
+$dism = & dism.exe /Online /Cleanup-Image /RestoreHealth
+$codigo = $LASTEXITCODE
+@($dism) | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -and $_ -notmatch "%" } | Select-Object -Last 3 | ForEach-Object { Write-Output $_ }
+if ($codigo -ne 0) { Write-Warning "DISM terminó con el código $codigo." }
+Write-Output "Paso 2 de 2: SFC revisa los archivos del sistema (10 a 20 minutos)..."
+$sfc = (@(& sfc.exe /scannow) -join "`n") -replace "`0", ""
+($sfc -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch "%" } | Select-Object -Last 3 | ForEach-Object { Write-Output $_ }
+Write-Output "Detalle completo en C:\Windows\Logs\CBS\CBS.log. Reinicia el equipo al terminar."
+'@
+
+$script:codigoArranque = @'
+$lista = @(Get-CimInstance -ClassName Win32_StartupCommand -ErrorAction SilentlyContinue | Sort-Object Name)
+Write-Output "Programas que arrancan con Windows: $($lista.Count)"
+foreach ($p in $lista) { Write-Output (" - {0}   ({1})" -f $p.Name, $p.Command) }
+Write-Output "Si ves algo que no reconoces, búscalo en Internet antes de borrarlo. Para desactivar uno: Administrador de tareas > Aplicaciones de arranque."
+'@
+
+function New-TarjetaAccion {
+    param([string]$Titulo, [string]$Descripcion, [string]$Riesgo, [string]$Aviso, [string]$TextoBoton, [scriptblock]$Accion, [bool]$Permitido = $true, [string]$Motivo = "", $Panel = $null, [string]$Clave = "")
+    $item = [pscustomobject]@{ Nombre = $Titulo; Descripcion = $Descripcion; Riesgo = $Riesgo; Aviso = $Aviso }
+    $t = New-Tarjeta -Item $item -Marcado $false
+    # La tarjeta usa una casilla; aquí se cambia por un botón
+    $fila = $t.Casilla.Parent
+    $fila.Children.Remove($t.Casilla)
+    $titulo = New-Object System.Windows.Controls.TextBlock
+    $titulo.Text = $Titulo
+    $titulo.FontWeight = "SemiBold"
+    $titulo.VerticalAlignment = "Center"
+    $boton = New-Object System.Windows.Controls.Button
+    $boton.Content = $TextoBoton
+    $boton.Padding = "12,4"
+    $boton.Margin = "8,0,0,0"
+    $boton.Tag = $Permitido
+    $boton.IsEnabled = $Permitido
+    $boton.Add_Click($Accion)
+    [System.Windows.Controls.DockPanel]::SetDock($boton, "Right")
+    $fila.Children.Insert(0, $boton)
+    [void]$fila.Children.Add($titulo)
+    if (-not $Permitido -and $Motivo) {
+        $nota = New-Object System.Windows.Controls.TextBlock
+        $nota.Text = $Motivo
+        $nota.TextWrapping = "Wrap"
+        $nota.FontStyle = "Italic"
+        $nota.Foreground = Get-Pincel "#6B7280"
+        $nota.Margin = "20,3,0,0"
+        [void]$t.Borde.Child.Children.Add($nota)
+    }
+    $script:BotonesSeguridad += $boton
+    if (-not $Panel) { $Panel = $script:UI.PanelSeguridad }
+    [void]$Panel.Children.Add($t.Borde)
+    if ($Clave) {
+        # Permite mostrar estado y progreso en la tarjeta (como en las apps)
+        $script:TarjetaPorId[$Clave] = [pscustomobject]@{ Borde = $t.Borde; Estado = $t.Estado; Barra = $t.Barra; Firma = ""; Boton = $boton }
+    }
+}
+
+function New-PasoScript {
+    param([string]$Nombre, [string]$Codigo)
+    return [pscustomobject]@{ Item = [pscustomobject]@{ Key = "SEG"; Nombre = $Nombre; InvokeScript = @($Codigo) }; Deshacer = $false }
+}
+
+# Estado del antivirus
+$script:Antivirus = @(Get-InfoAntivirus)
+$script:ModoDefender = Get-ModoDefender
+$defenderActivo = ($script:ModoDefender -eq "Normal")
+$otrosActivos = @($script:Antivirus | Where-Object { $_.Activo -and $_.Nombre -notmatch "Defender" })
+
+$resumen = New-Object System.Windows.Controls.TextBlock
+$resumen.TextWrapping = "Wrap"
+$resumen.Margin = "0,0,0,10"
+if ($script:Antivirus.Count -eq 0) {
+    $resumen.Text = "No se pudo detectar qué antivirus tienes."
+} else {
+    $partes = foreach ($a in $script:Antivirus) {
+        $estado = if ($a.Activo) { "activo" } else { "desactivado" }
+        $firmas = if ($a.AlDia) { "firmas al día" } else { "firmas DESACTUALIZADAS" }
+        "$($a.Nombre) ($estado, $firmas)"
+    }
+    $resumen.Text = "Antivirus detectado: " + ($partes -join "; ") + ". Microsoft Defender está en modo: $($script:ModoDefender)."
+}
+[void]$script:UI.PanelSeguridad.Children.Add((New-Titulo "Buscar virus y revisar el sistema" "Ninguna de estas acciones cambia ajustes de Windows. Los análisis largos pueden tardar más de una hora."))
+[void]$script:UI.PanelSeguridad.Children.Add($resumen)
+
+$motivoDefender = "Defender no es tu antivirus principal (modo: $($script:ModoDefender)). Usa 'Abrir mi antivirus' o la segunda opinión."
+if (-not $defenderActivo -and $otrosActivos.Count -eq 0) {
+    $motivoDefender = "Este equipo NO tiene ningún antivirus activo. Pulsa 'Abrir mi antivirus' y activa la protección en tiempo real de Seguridad de Windows; luego vuelve a abrir el optimizador."
+    $resumen.Text += " $([char]0x26A0) ATENCIÓN: no hay ningún antivirus activo en este equipo."
+    $resumen.Foreground = Get-Pincel $script:Colores.Alto.Texto
+    $resumen.FontWeight = "SemiBold"
+}
+if ($otrosActivos.Count) {
+    $motivoDefender = "Defender está desactivado porque usas $($otrosActivos[0].Nombre). Usa 'Abrir mi antivirus' o la segunda opinión."
+}
+
+New-TarjetaAccion -Titulo "Abrir mi antivirus" -TextoBoton "Abrir" -Riesgo "Bajo" `
+    -Descripcion "Abre tu antivirus para lanzar un análisis completo desde él (por ejemplo, en ESET: Análisis del ordenador > Analizar el ordenador)." `
+    -Aviso "" -Accion {
+        $exe = $null
+        if (@($script:Antivirus | Where-Object { $_.Activo -and $_.Nombre -match "ESET" }).Count) {
+            $exe = Get-ChildItem -Path "$env:ProgramFiles\ESET" -Filter "egui.exe" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+        }
+        if ($exe) { Start-Process -FilePath $exe } else { Start-Process "windowsdefender:" }
+    }
+
+New-TarjetaAccion -Titulo "Análisis rápido con Microsoft Defender" -TextoBoton "Analizar" -Riesgo "Bajo" `
+    -Descripcion "Actualiza las firmas y revisa las zonas donde suele esconderse el malware. Unos 5-15 minutos." `
+    -Aviso "" -Permitido $defenderActivo -Motivo $motivoDefender -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Análisis rápido con Defender" -Codigo ('$Tipo = "QuickScan"' + "`n" + $script:codigoDefender.Substring($script:codigoDefender.IndexOf("`n") + 1)))
+    }
+
+New-TarjetaAccion -Titulo "Análisis completo con Microsoft Defender" -TextoBoton "Analizar" -Riesgo "Bajo" `
+    -Descripcion "Revisa todos los archivos del disco." `
+    -Aviso "Puede tardar 1 hora o más y hace el equipo más lento mientras dura." -Permitido $defenderActivo -Motivo $motivoDefender -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Análisis completo con Defender" -Codigo ('$Tipo = "FullScan"' + "`n" + $script:codigoDefender.Substring($script:codigoDefender.IndexOf("`n") + 1)))
+    }
+
+New-TarjetaAccion -Titulo "Segunda opinión: Microsoft Safety Scanner" -TextoBoton "Descargar y abrir" -Riesgo "Bajo" `
+    -Descripcion "Descarga el escáner gratuito de Microsoft, comprueba su firma y lo abre. Funciona junto a ESET u otro antivirus sin conflictos." `
+    -Aviso "Descarga unos 200 MB. La copia caduca a los 10 días, por eso se descarga de nuevo cada vez. Si elige eliminar algo, revisa la lista antes de aceptar." -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Microsoft Safety Scanner" -Codigo $script:codigoSafetyScanner)
+    }
+
+New-TarjetaAccion -Titulo "Reparar archivos de Windows (DISM + SFC)" -TextoBoton "Reparar" -Riesgo "Bajo" `
+    -Descripcion "Comprueba y repara archivos dañados del sistema. Útil si Windows da errores raros o tras quitar un virus." `
+    -Aviso "Tarda entre 20 y 50 minutos y necesita Internet para DISM. No apagues el equipo mientras dura." -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Reparar archivos de Windows" -Codigo $script:codigoReparar)
+    }
+
+New-TarjetaAccion -Titulo "Ver programas que arrancan con Windows" -TextoBoton "Ver lista" -Riesgo "Bajo" `
+    -Descripcion "Muestra en el registro de abajo qué programas se inician solos. Es donde suele colarse el software no deseado." `
+    -Aviso "" -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Programas de arranque" -Codigo $script:codigoArranque)
+    }
+
+# ---------------------------------------------------------------- Pestaña Apps
+$AppsB64 = '__APPS_B64__'
+$script:Apps = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($AppsB64)) | ConvertFrom-Json
+$script:TarjetasApps = @()
+$script:SeccionesApps = @()
+$script:AppsComprobadas = $false
+
+function Update-EstadosApps {
+    $colores = @{ ok = "#1E7B3A"; update = "#2563EB"; error = "#B42318"; trabajo = "#A85F00"; info = "#6B7280" }
+    foreach ($id in @($global:Estado.Apps.Keys)) {
+        $t = $script:TarjetaPorId[$id]
+        if (-not $t) { continue }
+        $e = $global:Estado.Apps[$id]
+        $firma = "$($e.Texto)|$($e.Tipo)|$($e.Progreso)"
+        if ($firma -eq $t.Firma) { continue }
+        $t.Firma = $firma
+        $t.Estado.Text = $e.Texto
+        $t.Estado.Visibility = if ($e.Texto) { "Visible" } else { "Collapsed" }
+        $t.Estado.Foreground = Get-Pincel $colores[[string]$e.Tipo]
+        if ($e.Tipo -eq "trabajo") {
+            $t.Barra.Visibility = "Visible"
+            if ($e.Progreso -ge 0) { $t.Barra.IsIndeterminate = $false; $t.Barra.Value = $e.Progreso } else { $t.Barra.IsIndeterminate = $true }
+            $t.Borde.BorderBrush = Get-Pincel "#F59E0B"
+        } else {
+            $t.Barra.Visibility = "Collapsed"
+            $t.Barra.IsIndeterminate = $false
+            $t.Borde.BorderBrush = Get-Pincel $(if ($e.Tipo -eq "ok") { "#86EFAC" } elseif ($e.Tipo -eq "update") { "#93C5FD" } elseif ($e.Tipo -eq "error") { "#FCA5A5" } else { "#E5E7EB" })
+        }
+    }
+}
+
+function Start-ComprobarApps {
+    if ($script:Trabajo -or -not $script:WingetOk) { return }
+    $script:AppsComprobadas = $true
+    $lista = ($script:Apps | ForEach-Object { "'" + $_.Id + "'" }) -join ","
+    Start-Pasos -Pasos @(New-PasoScript -Nombre "Comprobar apps instaladas" -Codigo "Get-EstadoApps -Ids @($lista)") -Silencioso
+}
+
+$script:WingetOk = [bool](Get-Command winget.exe -ErrorAction SilentlyContinue)
+if ($script:WingetOk) {
+    $script:UI.TxtWinget.Text = "Las apps se descargan de su fuente oficial con winget, el instalador de Microsoft. Se instalan en silencio, una tras otra. Si una app ya está instalada, se indica y se pasa a la siguiente."
+} else {
+    $script:UI.TxtWinget.Text = "$([char]0x26A0) winget no está instalado en este equipo. Ve a la pestaña Reparaciones y pulsa 'Reparar winget' antes de instalar apps."
+    $script:UI.TxtWinget.Foreground = Get-Pincel $script:Colores.Alto.Texto
+}
+
+foreach ($cat in ($script:Apps | Select-Object -ExpandProperty Categoria -Unique)) {
+    $seccion = New-Object System.Windows.Controls.StackPanel
+    $tit = New-Titulo $cat ""
+    [void]$seccion.Children.Add($tit)
+    $rejilla = New-Object System.Windows.Controls.WrapPanel
+    foreach ($app in ($script:Apps | Where-Object { $_.Categoria -eq $cat })) {
+        $borde = New-Object System.Windows.Controls.Border
+        $borde.Width = 300
+        $borde.Background = Get-Pincel "#FFFFFF"
+        $borde.BorderBrush = Get-Pincel "#E5E7EB"
+        $borde.BorderThickness = 1
+        $borde.CornerRadius = 6
+        $borde.Padding = "10,6"
+        $borde.Margin = "0,0,6,6"
+        $pila = New-Object System.Windows.Controls.StackPanel
+        $filaApp = New-Object System.Windows.Controls.DockPanel
+        $icono = New-ImagenB64 $app.Icono
+        if ($icono) {
+            $imagen = New-Object System.Windows.Controls.Image
+            $imagen.Source = $icono
+            $imagen.Width = 24
+            $imagen.Height = 24
+            $imagen.Margin = "0,0,8,0"
+            [System.Windows.Controls.DockPanel]::SetDock($imagen, "Left")
+            [void]$filaApp.Children.Add($imagen)
+        } else {
+            # Sin icono: círculo con la inicial
+            $circulo = New-Object System.Windows.Controls.Border
+            $circulo.Width = 24
+            $circulo.Height = 24
+            $circulo.CornerRadius = 12
+            $circulo.Background = Get-Pincel "#DBEAFE"
+            $circulo.Margin = "0,0,8,0"
+            $inicial = New-Object System.Windows.Controls.TextBlock
+            $inicial.Text = $app.Nombre.Substring(0, 1)
+            $inicial.FontWeight = "Bold"
+            $inicial.Foreground = Get-Pincel "#1D4ED8"
+            $inicial.HorizontalAlignment = "Center"
+            $inicial.VerticalAlignment = "Center"
+            $circulo.Child = $inicial
+            [System.Windows.Controls.DockPanel]::SetDock($circulo, "Left")
+            [void]$filaApp.Children.Add($circulo)
+        }
+        $casilla = New-Object System.Windows.Controls.CheckBox
+        $casilla.Content = $app.Nombre
+        $casilla.FontWeight = "SemiBold"
+        $casilla.VerticalAlignment = "Center"
+        $casilla.Tag = $app
+        [void]$filaApp.Children.Add($casilla)
+        [void]$pila.Children.Add($filaApp)
+        $d = New-Object System.Windows.Controls.TextBlock
+        $d.Text = $app.Descripcion
+        $d.TextWrapping = "Wrap"
+        $d.FontSize = 12
+        $d.Foreground = Get-Pincel "#4B5563"
+        $d.Margin = "32,1,0,0"
+        [void]$pila.Children.Add($d)
+        if ($app.Aviso) {
+            $a = New-Object System.Windows.Controls.TextBlock
+            $a.Text = "$([char]0x26A0) $($app.Aviso)"
+            $a.TextWrapping = "Wrap"
+            $a.FontSize = 12
+            $a.Foreground = Get-Pincel $script:Colores.Medio.Texto
+            $a.Margin = "32,2,0,0"
+            [void]$pila.Children.Add($a)
+        }
+        $estadoTxt = New-Object System.Windows.Controls.TextBlock
+        $estadoTxt.FontSize = 12
+        $estadoTxt.FontWeight = "SemiBold"
+        $estadoTxt.Margin = "32,3,0,0"
+        $estadoTxt.Visibility = "Collapsed"
+        [void]$pila.Children.Add($estadoTxt)
+        $barraApp = New-Object System.Windows.Controls.ProgressBar
+        $barraApp.Height = 5
+        $barraApp.Minimum = 0
+        $barraApp.Maximum = 100
+        $barraApp.Margin = "32,3,0,2"
+        $barraApp.Visibility = "Collapsed"
+        [void]$pila.Children.Add($barraApp)
+        $borde.Child = $pila
+        [void]$rejilla.Children.Add($borde)
+        $tarjeta = [pscustomobject]@{ Borde = $borde; Casilla = $casilla; App = $app; Seccion = $seccion; Estado = $estadoTxt; Barra = $barraApp; Firma = "" }
+        $script:TarjetasApps += $tarjeta
+        $script:TarjetaPorId[$app.Id] = $tarjeta
+    }
+    [void]$seccion.Children.Add($rejilla)
+    [void]$script:UI.PanelApps.Children.Add($seccion)
+    $script:SeccionesApps += $seccion
+}
+
+$script:UI.TxtBuscarApp.Add_TextChanged({
+    $texto = $script:UI.TxtBuscarApp.Text.Trim()
+    foreach ($t in $script:TarjetasApps) {
+        $coincide = (-not $texto) -or ($t.App.Nombre -like "*$texto*") -or ($t.App.Descripcion -like "*$texto*") -or ($t.App.Categoria -like "*$texto*")
+        $t.Borde.Visibility = if ($coincide) { "Visible" } else { "Collapsed" }
+    }
+    foreach ($s in $script:SeccionesApps) {
+        $visibles = @($script:TarjetasApps | Where-Object { $_.Seccion -eq $s -and $_.Borde.Visibility -eq "Visible" }).Count
+        $s.Visibility = if ($visibles) { "Visible" } else { "Collapsed" }
+    }
+})
+
+function Get-AppsMarcadas { return @($script:TarjetasApps | Where-Object { $_.Casilla.IsChecked } | ForEach-Object { $_.App }) }
+
+function Start-AccionApps {
+    param([string]$Accion, [string]$Verbo)
+    if (-not $script:WingetOk) {
+        [void][System.Windows.MessageBox]::Show("winget no está instalado. Ve a Reparaciones > 'Reparar winget'.", "Apps", "OK", "Warning")
+        return
+    }
+    $sel = Get-AppsMarcadas
+    if ($sel.Count -eq 0) {
+        [void][System.Windows.MessageBox]::Show("Marca al menos una app.", "Apps", "OK", "Information")
+        return
+    }
+    $msg = "Vas a $Verbo $($sel.Count) app(s):`r`n" + (($sel | ForEach-Object { " - $($_.Nombre)" }) -join "`r`n")
+    $conAviso = @($sel | Where-Object { $_.Aviso })
+    if ($conAviso.Count -and $Accion -eq "install") {
+        $msg += "`r`n`r`nTen en cuenta:`r`n" + (($conAviso | ForEach-Object { " - $($_.Nombre): $($_.Aviso)" }) -join "`r`n")
+    }
+    if ($Accion -eq "uninstall") { $msg += "`r`n`r`nSe borrarán estas apps del equipo. Sus datos de usuario normalmente se conservan." }
+    $msg += "`r`n`r`n¿Continuar?"
+    $icono = if ($Accion -eq "uninstall" -or $conAviso.Count) { "Warning" } else { "Question" }
+    if ([System.Windows.MessageBox]::Show($msg, "Apps", "YesNo", $icono) -ne "Yes") { return }
+    foreach ($a in $sel) { $global:Estado.Apps[$a.Id] = @{ Texto = "En espera..."; Tipo = "trabajo"; Progreso = -1 } }
+    $pasos = foreach ($a in $sel) {
+        New-PasoScript -Nombre "$Verbo $($a.Nombre)" -Codigo ("Invoke-AppWinget -Accion '{0}' -Id '{1}' -Fuente '{2}'" -f $Accion, $a.Id, $a.Fuente)
+    }
+    Start-Pasos -Pasos @($pasos) -Titulo "$($Verbo.Substring(0,1).ToUpper())$($Verbo.Substring(1)) apps"
+}
+
+$script:UI.BtnAppsInstalar.Add_Click({ Start-AccionApps -Accion "install" -Verbo "instalar" })
+$script:UI.BtnAppsActualizar.Add_Click({ Start-AccionApps -Accion "upgrade" -Verbo "actualizar" })
+$script:UI.BtnAppsDesinstalar.Add_Click({ Start-AccionApps -Accion "uninstall" -Verbo "desinstalar" })
+$script:UI.BtnAppsLimpiar.Add_Click({ foreach ($t in $script:TarjetasApps) { $t.Casilla.IsChecked = $false } })
+$script:UI.BtnAppsComprobar.Add_Click({ Start-ComprobarApps })
+$script:UI.BtnAppsPanel.Add_Click({ Start-Process "appwiz.cpl" })
+$script:UI.BtnAppsActualizables.Add_Click({
+    $n = 0
+    foreach ($t in $script:TarjetasApps) {
+        $e = $global:Estado.Apps[$t.App.Id]
+        $t.Casilla.IsChecked = [bool]($e -and $e.Tipo -eq "update")
+        if ($t.Casilla.IsChecked) { $n++ }
+    }
+    if ($n -eq 0) { [void][System.Windows.MessageBox]::Show("No hay apps de esta lista con actualización (pulsa antes 'Comprobar instaladas').", "Apps", "OK", "Information") }
+})
+$script:UI.BtnAppsTodo.Add_Click({
+    if (-not $script:WingetOk) {
+        [void][System.Windows.MessageBox]::Show("winget no está instalado. Ve a Reparaciones > 'Reparar winget'.", "Apps", "OK", "Warning")
+        return
+    }
+    $msg = "Se actualizarán TODAS las apps del equipo que winget reconozca (no solo las de esta lista).`r`n`r`nCierra tus programas antes: algunos se cerrarán solos al actualizarse. Puede tardar bastante.`r`n`r`n¿Continuar?"
+    if ([System.Windows.MessageBox]::Show($msg, "Actualizar todo", "YesNo", "Question") -ne "Yes") { return }
+    Start-Pasos -Pasos @(New-PasoScript -Nombre "Actualizar todas las apps" -Codigo "Invoke-AppWinget -Accion 'upgradeall'")
+})
+
+# ---------------------------------------------------------------- Pestaña Reparaciones
+$script:fixRed = @'
+Write-Output "Limpiando la caché DNS..."
+ipconfig /flushdns | Out-Null
+Write-Output "Restableciendo Winsock..."
+netsh winsock reset | Out-Null
+Write-Output "Restableciendo TCP/IP (IPv4 e IPv6)..."
+netsh int ip reset | Out-Null
+netsh int ipv6 reset | Out-Null
+Write-Output "Red restablecida. REINICIA el equipo para terminar."
+'@
+
+$script:fixDns = @'
+ipconfig /flushdns | Out-Null
+Clear-DnsClientCache -ErrorAction SilentlyContinue
+Write-Output "Caché DNS limpiada."
+'@
+
+$script:fixUpdate = @'
+$servicios = "wuauserv", "bits", "cryptsvc", "msiserver"
+try {
+    foreach ($s in $servicios) {
+        Write-Output "Deteniendo el servicio $s..."
+        Stop-Service -Name $s -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($c in @("$env:SystemRoot\SoftwareDistribution", "$env:SystemRoot\System32\catroot2")) {
+        if (Test-Path "$c.old") { Remove-Item -Path "$c.old" -Recurse -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $c) {
+            try {
+                Rename-Item -Path $c -NewName ((Split-Path $c -Leaf) + ".old") -ErrorAction Stop
+                Write-Output "Carpeta $c reiniciada."
+            } catch {
+                Write-Warning "No se pudo renombrar $c (está en uso). Reinicia el equipo y vuelve a intentarlo."
+            }
+        }
+    }
+} finally {
+    foreach ($s in $servicios) { Start-Service -Name $s -ErrorAction SilentlyContinue }
+}
+Write-Output "Windows Update restablecido. Reinicia y vuelve a buscar actualizaciones."
+'@
+
+$script:fixImpresion = @'
+Write-Output "Deteniendo la cola de impresión..."
+Stop-Service -Name Spooler -Force -ErrorAction Stop
+Remove-Item -Path "$env:SystemRoot\System32\spool\PRINTERS\*" -Force -Recurse -ErrorAction SilentlyContinue
+Start-Service -Name Spooler -ErrorAction Stop
+Write-Output "Cola de impresión vaciada y servicio reiniciado. Vuelve a imprimir."
+'@
+
+$script:fixTienda = @'
+Start-Process -FilePath "wsreset.exe"
+Write-Output "Se está limpiando la caché de la Tienda. Se abrirá sola al terminar (puede tardar un minuto)."
+'@
+
+$script:fixWinget = @'
+Write-Output "Volviendo a registrar el Instalador de aplicaciones..."
+try { Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe -ErrorAction Stop } catch { }
+if (Get-Command winget.exe -ErrorAction SilentlyContinue) {
+    Write-Output "Restableciendo los orígenes de winget..."
+    winget.exe source reset --force 2>&1 | Out-Null
+    winget.exe source update 2>&1 | Out-Null
+    Write-Output ("winget funciona. Versión: " + (winget.exe --version))
+    Write-Output "Cierra y vuelve a abrir el optimizador para usar la pestaña Apps."
+} else {
+    Write-Warning "winget no está instalado. Se abre la Tienda en 'Instalador de aplicación': pulsa Obtener o Actualizar y luego vuelve a abrir el optimizador."
+    Start-Process "ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1"
+}
+'@
+
+$script:fixIconos = @'
+Write-Output "Cerrando el Explorador..."
+Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+Remove-Item -Path "$env:LOCALAPPDATA\IconCache.db" -Force -ErrorAction SilentlyContinue
+Remove-Item -Path "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\iconcache_*.db" -Force -ErrorAction SilentlyContinue
+Remove-Item -Path "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\thumbcache_*.db" -Force -ErrorAction SilentlyContinue
+if (-not (Get-Process -Name explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
+Write-Output "Caché de iconos y miniaturas borrada. Si algún icono sigue mal, reinicia el equipo."
+'@
+
+$script:fixHora = @'
+Set-Service -Name w32time -StartupType Manual -ErrorAction SilentlyContinue
+Start-Service -Name w32time -ErrorAction SilentlyContinue
+w32tm /resync /force 2>&1 | ForEach-Object { $t = ([string]$_).Trim(); if ($t) { Write-Output $t } }
+Write-Output ("Hora actual: " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
+'@
+
+$pR = $script:UI.PanelReparaciones
+[void]$pR.Children.Add((New-Titulo "Reparaciones rápidas" "Soluciones a los problemas más comunes. Cada una indica su riesgo y si necesita reiniciar."))
+
+New-TarjetaAccion -Panel $pR -Titulo "Limpiar caché DNS" -TextoBoton "Limpiar" -Riesgo "Bajo" `
+    -Descripcion "Útil cuando una página no carga o carga la versión vieja." -Aviso "" -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Limpiar caché DNS" -Codigo $script:fixDns)
+    }
+
+New-TarjetaAccion -Panel $pR -Titulo "Restablecer la red" -TextoBoton "Restablecer" -Riesgo "Medio" `
+    -Descripcion "Limpia DNS y restablece Winsock y TCP/IP. Para cuando hay Wi-Fi o cable conectado pero no hay Internet." `
+    -Aviso "Si el equipo tiene una IP fija puesta a mano, se borra y hay que volver a configurarla. Algunas VPN pueden necesitar reinstalarse. Requiere reiniciar." -Accion {
+        if ([System.Windows.MessageBox]::Show("Si este equipo tiene IP fija configurada a mano, anótala antes: se borrará.`r`n`r`n¿Continuar?", "Restablecer red", "YesNo", "Warning") -eq "Yes") {
+            Start-Pasos -Pasos @(New-PasoScript -Nombre "Restablecer la red" -Codigo $script:fixRed)
+        }
+    }
+
+New-TarjetaAccion -Panel $pR -Titulo "Reparar Windows Update" -TextoBoton "Reparar" -Riesgo "Medio" `
+    -Descripcion "Reinicia los servicios y la caché de Windows Update. Para cuando las actualizaciones fallan o se quedan atascadas." `
+    -Aviso "Se borra el historial de actualizaciones que se ve en Configuración y vuelven a descargarse las pendientes. No lo uses mientras se instala una actualización." -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Reparar Windows Update" -Codigo $script:fixUpdate)
+    }
+
+New-TarjetaAccion -Panel $pR -Titulo "Desatascar la impresora" -TextoBoton "Limpiar cola" -Riesgo "Bajo" `
+    -Descripcion "Vacía la cola de impresión y reinicia el servicio. Para cuando un documento se queda 'en cola' y nada imprime." `
+    -Aviso "Se cancelan todos los trabajos pendientes de todas las impresoras." -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Desatascar la impresora" -Codigo $script:fixImpresion)
+    }
+
+New-TarjetaAccion -Panel $pR -Titulo "Reparar Microsoft Store" -TextoBoton "Reparar" -Riesgo "Bajo" `
+    -Descripcion "Limpia la caché de la Tienda (WSReset). Para cuando no descarga o no abre." -Aviso "" -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Reparar Microsoft Store" -Codigo $script:fixTienda)
+    }
+
+New-TarjetaAccion -Panel $pR -Titulo "Reparar winget" -TextoBoton "Reparar" -Riesgo "Bajo" `
+    -Descripcion "Vuelve a registrar winget y sus orígenes, o abre la Tienda para instalarlo. Necesario para la pestaña Apps." -Aviso "" -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Reparar winget" -Codigo $script:fixWinget)
+    }
+
+New-TarjetaAccion -Panel $pR -Titulo "Reconstruir iconos y miniaturas" -TextoBoton "Reconstruir" -Riesgo "Bajo" `
+    -Descripcion "Para iconos en blanco, equivocados o miniaturas que no se ven." `
+    -Aviso "La barra de tareas y el escritorio desaparecen unos segundos." -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Reconstruir iconos" -Codigo $script:fixIconos)
+    }
+
+New-TarjetaAccion -Panel $pR -Titulo "Sincronizar la hora" -TextoBoton "Sincronizar" -Riesgo "Bajo" `
+    -Descripcion "Ajusta el reloj con el servidor de hora de Internet. Una hora mal puesta rompe páginas seguras y licencias." -Aviso "" -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Sincronizar la hora" -Codigo $script:fixHora)
+    }
+
+# ---------------------------------------------------------------- Pestaña Informe
+$script:CarpetaInformes = Join-Path $env:LOCALAPPDATA "OptimizadorES\Informes"
+
+$script:codigoInforme = @'
+$ErrorActionPreference = "SilentlyContinue"
+Write-Output "Recopilando información del equipo (20 a 60 segundos)..."
+$r = New-Object System.Collections.Generic.List[string]
+function Sec($t) { $r.Add(""); $r.Add("=== $t ===") }
+function L($k, $v) { $r.Add(("{0,-30} {1}" -f ($k + ":"), $v)) }
+
+$cs   = Get-CimInstance Win32_ComputerSystem
+$os   = Get-CimInstance Win32_OperatingSystem
+$bios = Get-CimInstance Win32_BIOS
+$cpu  = @(Get-CimInstance Win32_Processor)[0]
+$cv   = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+
+$r.Add("INFORME DEL EQUIPO - OptimizadorES")
+L "Fecha del informe" (Get-Date -Format "yyyy-MM-dd HH:mm")
+
+Sec "Equipo"
+L "Nombre del equipo" $env:COMPUTERNAME
+L "Usuario" $env:USERNAME
+L "Fabricante y modelo" "$($cs.Manufacturer) $($cs.Model)"
+L "Número de serie" $bios.SerialNumber
+L "BIOS" "$($bios.SMBIOSBIOSVersion) ($($bios.ReleaseDate))"
+
+Sec "Windows"
+L "Sistema" "$($os.Caption) $($cv.DisplayVersion) (compilación $($cv.CurrentBuild).$($cv.UBR))"
+L "Instalado el" $os.InstallDate
+$enc = (Get-Date) - $os.LastBootUpTime
+L "Encendido desde" ("{0} (hace {1} días y {2} h)" -f $os.LastBootUpTime, $enc.Days, $enc.Hours)
+$lic = Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f'" | Select-Object -First 1
+$estadosLic = @{ 0 = "Sin licencia"; 1 = "Activado"; 2 = "Periodo de gracia"; 3 = "Gracia adicional"; 4 = "Gracia no genuina"; 5 = "NO activado (notificación)"; 6 = "Gracia extendida" }
+L "Activación de Windows" $(if ($lic) { $estadosLic[[int]$lic.LicenseStatus] } else { "No se pudo leer" })
+$hf = Get-HotFix | Where-Object { $_.InstalledOn } | Sort-Object InstalledOn -Descending | Select-Object -First 1
+L "Última actualización" $(if ($hf) { "$($hf.HotFixID) el $($hf.InstalledOn.ToString('yyyy-MM-dd'))" } else { "Desconocida" })
+
+Sec "Procesador, memoria y gráficos"
+L "Procesador" "$($cpu.Name.Trim()) ($($cpu.NumberOfCores) núcleos / $($cpu.NumberOfLogicalProcessors) hilos)"
+$usoRam = [math]::Round(100 - 100 * $os.FreePhysicalMemory / $os.TotalVisibleMemorySize)
+L "RAM" ("{0} GB en total, {1} GB libres ({2}% en uso)" -f [math]::Round($os.TotalVisibleMemorySize / 1MB, 1), [math]::Round($os.FreePhysicalMemory / 1MB, 1), $usoRam)
+foreach ($m in Get-CimInstance Win32_PhysicalMemory) {
+    L "  Módulo $($m.DeviceLocator)" ("{0} GB a {1} MHz ({2})" -f ($m.Capacity / 1GB), $m.ConfiguredClockSpeed, $m.Manufacturer)
+}
+foreach ($g in Get-CimInstance Win32_VideoController) { L "Tarjeta gráfica" "$($g.Name) (driver $($g.DriverVersion))" }
+
+Sec "Discos"
+foreach ($d in Get-PhysicalDisk) {
+    $rel = $d | Get-StorageReliabilityCounter
+    $extra = @()
+    if ($rel.Temperature) { $extra += "$($rel.Temperature) °C" }
+    if ($null -ne $rel.Wear) { $extra += "desgaste $($rel.Wear)%" }
+    $salud = switch ([string]$d.HealthStatus) { "Healthy" { "buena" } "Warning" { "ADVERTENCIA" } "Unhealthy" { "MALA - haz copia de seguridad ya" } default { [string]$d.HealthStatus } }
+    L $d.FriendlyName ("{0}, {1} GB, salud {2} {3}" -f $d.MediaType, [math]::Round($d.Size / 1GB), $salud, ($extra -join ", "))
+}
+foreach ($v in (Get-Volume | Where-Object { $_.DriveLetter -and $_.Size -gt 0 } | Sort-Object DriveLetter)) {
+    $pct = [math]::Round(100 * $v.SizeRemaining / $v.Size)
+    $alerta = if ($pct -lt 10) { "  <-- POCO ESPACIO" } else { "" }
+    L "  Unidad $($v.DriveLetter):" ("{0} GB libres de {1} GB ({2}%){3}" -f [math]::Round($v.SizeRemaining / 1GB, 1), [math]::Round($v.Size / 1GB, 1), $pct, $alerta)
+}
+
+Sec "Batería"
+$bat = Get-CimInstance Win32_Battery | Select-Object -First 1
+if ($bat) {
+    $diseno = (Get-CimInstance -Namespace root/wmi -ClassName BatteryStaticData | Select-Object -First 1).DesignedCapacity
+    $llena  = (Get-CimInstance -Namespace root/wmi -ClassName BatteryFullChargedCapacity | Select-Object -First 1).FullChargedCapacity
+    L "Carga actual" "$($bat.EstimatedChargeRemaining)%"
+    if ($diseno -and $llena) {
+        $saludBat = [math]::Round(100 * $llena / $diseno)
+        $nota = if ($saludBat -lt 60) { "  <-- conviene cambiarla" } else { "" }
+        L "Salud de la batería" ("{0}% de su capacidad original ({1} de {2} mWh){3}" -f $saludBat, $llena, $diseno, $nota)
+    }
+} else {
+    L "Batería" "No tiene (equipo de escritorio)"
+}
+
+Sec "Red"
+foreach ($a in (Get-NetAdapter | Where-Object { $_.Status -eq "Up" })) {
+    $ip  = (Get-NetIPAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 | Select-Object -First 1).IPAddress
+    $dns = (Get-DnsClientServerAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4).ServerAddresses -join ", "
+    L $a.Name "$($a.InterfaceDescription), $($a.LinkSpeed), IP $ip, DNS $dns"
+}
+
+Sec "Seguridad"
+foreach ($p in Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct) {
+    $hex = "{0:X6}" -f [int]$p.productState
+    $act = if (@("10", "11") -contains $hex.Substring(2, 2)) { "activo" } else { "desactivado" }
+    $fir = if ($hex.Substring(4, 2) -eq "00") { "firmas al día" } else { "firmas DESACTUALIZADAS" }
+    L "Antivirus" "$($p.displayName) ($act, $fir)"
+}
+$bl = Get-BitLockerVolume -MountPoint $env:SystemDrive
+if ($bl) { L "BitLocker en $($env:SystemDrive)" $(if ([string]$bl.ProtectionStatus -eq "On") { "activado" } else { "desactivado" }) }
+
+Sec "Dispositivos con problemas"
+$malos = @(Get-PnpDevice -PresentOnly -Status ERROR, DEGRADED)
+if ($malos.Count) {
+    foreach ($m in $malos) { L "  $($m.Class)" "$($m.FriendlyName) ($($m.Status))" }
+} else {
+    $r.Add("Ninguno: todos los dispositivos funcionan.")
+}
+
+Sec "Errores del sistema (últimos 7 días)"
+$ev = @(Get-WinEvent -FilterHashtable @{ LogName = "System"; Level = 1, 2; StartTime = (Get-Date).AddDays(-7) } -MaxEvents 500)
+$crit = @($ev | Where-Object { $_.Level -eq 1 })
+L "Errores críticos" $crit.Count
+L "Errores" (@($ev | Where-Object { $_.Level -eq 2 }).Count)
+$apagones = @($crit | Where-Object { $_.Id -eq 41 }).Count
+if ($apagones) { $r.Add("  $apagones apagado(s) inesperado(s) (Kernel-Power 41): corte de luz, cuelgue o fallo de la fuente.") }
+$ev | Group-Object ProviderName | Sort-Object Count -Descending | Select-Object -First 5 | ForEach-Object { L "  $($_.Name)" "$($_.Count) veces" }
+
+Sec "Programas que arrancan con Windows"
+foreach ($p in (Get-CimInstance Win32_StartupCommand | Sort-Object Name)) { $r.Add("  - $($p.Name)") }
+
+$carpeta = Join-Path $env:LOCALAPPDATA "OptimizadorES\Informes"
+New-Item -ItemType Directory -Force -Path $carpeta | Out-Null
+$archivo = Join-Path $carpeta ("Informe_{0}_{1:yyyyMMdd_HHmm}.txt" -f $env:COMPUTERNAME, (Get-Date))
+$r | Set-Content -Path $archivo -Encoding UTF8
+Copy-Item -Path $archivo -Destination ([Environment]::GetFolderPath("Desktop")) -ErrorAction SilentlyContinue
+Write-Output "Informe guardado en $archivo (y una copia en el Escritorio)."
+Start-Process -FilePath "notepad.exe" -ArgumentList "`"$archivo`""
+'@
+
+$script:codigoBateria = @'
+$carpeta = Join-Path $env:LOCALAPPDATA "OptimizadorES\Informes"
+New-Item -ItemType Directory -Force -Path $carpeta | Out-Null
+$archivo = Join-Path $carpeta ("Bateria_{0}_{1:yyyyMMdd_HHmm}.html" -f $env:COMPUTERNAME, (Get-Date))
+powercfg /batteryreport /output "$archivo" 2>&1 | Out-Null
+if (Test-Path $archivo) {
+    Start-Process -FilePath $archivo
+    Write-Output "Informe de batería abierto en el navegador: $archivo"
+} else {
+    Write-Warning "Este equipo no tiene batería o no se pudo generar el informe."
+}
+'@
+
+$pI = $script:UI.PanelInforme
+[void]$pI.Children.Add((New-Titulo "Informe del equipo" "Crea un resumen en texto para guardar en el ticket de soporte o comparar el antes y el después. No cambia nada en el equipo."))
+
+New-TarjetaAccion -Panel $pI -Titulo "Generar informe del equipo" -TextoBoton "Generar" -Riesgo "Bajo" `
+    -Descripcion "Equipo y número de serie, Windows y activación, procesador, RAM, gráficos, salud y espacio de discos, batería, red, antivirus, BitLocker, dispositivos con errores, errores críticos de la última semana y programas de arranque." `
+    -Aviso "Incluye el número de serie, el usuario y las IP: compártelo solo con quien da soporte." -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Informe del equipo" -Codigo $script:codigoInforme)
+    }
+
+New-TarjetaAccion -Panel $pI -Titulo "Informe de batería (portátiles)" -TextoBoton "Generar" -Riesgo "Bajo" `
+    -Descripcion "Informe oficial de Windows con el historial de uso y el desgaste de la batería." -Aviso "" -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Informe de batería" -Codigo $script:codigoBateria)
+    }
+
+New-TarjetaAccion -Panel $pI -Titulo "Abrir carpeta de informes" -TextoBoton "Abrir" -Riesgo "Bajo" `
+    -Descripcion "Todos los informes generados en este equipo." -Aviso "" -Accion {
+        New-Item -ItemType Directory -Force -Path $script:CarpetaInformes | Out-Null
+        Start-Process -FilePath "explorer.exe" -ArgumentList "`"$($script:CarpetaInformes)`""
+    }
+
+# Botones de abajo: solo se muestran los que sirven en la pestaña abierta
+$script:UI.Pestanas.Add_SelectionChanged({
+    param($origen, $evento)
+    if ($evento.OriginalSource -ne $script:UI.Pestanas) { return }
+    $i = $script:UI.Pestanas.SelectedIndex
+    $enAjustes = if ($i -eq 0) { "Visible" } else { "Collapsed" }
+    foreach ($b in "BtnRecomendados", "BtnPresetEstandar", "BtnPresetMinimo", "BtnLimpiar", "BtnDeshacer", "BtnAplicar") { $script:UI[$b].Visibility = $enAjustes }
+    $script:UI.BtnPreferencias.Visibility = if ($i -eq 1) { "Visible" } else { "Collapsed" }
+    if ($i -eq 2 -and -not $script:AppsComprobadas) { Start-ComprobarApps }
+    if ($i -eq 3 -and -not $script:FeaturesComprobadas) { Start-ComprobarFeatures }
+})
+$script:UI.BtnPreferencias.Visibility = "Collapsed"
+
+# ---------------------------------------------------------------- Acceso directo
+New-TarjetaAccion -Panel $script:UI.PanelAyuda -Titulo "Crear acceso directo en el Escritorio" -TextoBoton "Crear" -Riesgo "Bajo" `
+    -Descripcion "Copia el optimizador a tu perfil y crea un acceso directo con su icono en el Escritorio y en el menú Inicio, para abrirlo como una app." `
+    -Aviso "Si más adelante descargas una versión nueva, ábrela una vez y vuelve a pulsar este botón para actualizar la copia." -Accion {
+        try {
+            $carpeta = Join-Path $env:LOCALAPPDATA "OptimizadorES"
+            New-Item -ItemType Directory -Force -Path $carpeta | Out-Null
+            $copia = Join-Path $carpeta "OptimizadorES.ps1"
+            if ($script:RutaScript -ne $copia) { Copy-Item -LiteralPath $script:RutaScript -Destination $copia -Force }
+            $ico = Join-Path $carpeta "OptimizadorES.ico"
+            [IO.File]::WriteAllBytes($ico, [Convert]::FromBase64String($script:IconoIco))
+            $shell = New-Object -ComObject WScript.Shell
+            foreach ($dir in @([Environment]::GetFolderPath("Desktop"), [Environment]::GetFolderPath("Programs"))) {
+                $lnk = $shell.CreateShortcut((Join-Path $dir "Optimizador de Windows.lnk"))
+                $lnk.TargetPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+                $lnk.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$copia`""
+                $lnk.IconLocation = "$ico,0"
+                $lnk.WorkingDirectory = $carpeta
+                $lnk.Description = "Optimizador de Windows en español"
+                $lnk.Save()
+            }
+            Escribir-Log "Acceso directo creado en el Escritorio y en el menú Inicio."
+            [void][System.Windows.MessageBox]::Show("Listo: ya tienes 'Optimizador de Windows' en el Escritorio y en el menú Inicio.", "Acceso directo", "OK", "Information")
+        } catch {
+            Escribir-Log "No se pudo crear el acceso directo: $($_.Exception.Message)" "ERROR"
+        }
+    }
+
+# ---------------------------------------------------------------- Resumen al terminar
+function Show-ResumenTrabajo {
+    $o = $script:OpcionesTrabajo
+    $r = $global:Estado.Resumen
+    if (-not $o -or -not $r -or $o.Silencioso) { return }
+    if ($r.Cancelado) {
+        [void][System.Windows.MessageBox]::Show("Proceso cancelado: no se pudo crear el punto de restauración, así que no se cambió nada. Revisa el registro de abajo.", $o.Titulo, "OK", "Error")
+        return
+    }
+    $msg = "$($o.Titulo): terminado.`r`n`r`n"
+    $msg += "$([char]0x2714) Correctos: $($r.Ok)`r`n"
+    if ($r.Avisos) { $msg += "$([char]0x26A0) Con avisos: $($r.Avisos)`r`n" }
+    if ($r.Errores) { $msg += "$([char]0x2716) Con errores: $($r.Errores)`r`n" }
+    if ($r.Avisos -or $r.Errores) { $msg += "`r`nLos detalles están en el registro de abajo.`r`n" }
+    $icono = if ($r.Errores) { "Warning" } else { "Information" }
+    if ($o.Reinicio -and ($r.Ok + $r.Avisos) -gt 0) {
+        $msg += "`r`nAlgunos cambios necesitan reiniciar el equipo. ¿Reiniciar ahora?`r`n(Guarda tu trabajo antes de pulsar Sí.)"
+        if ([System.Windows.MessageBox]::Show($msg, $o.Titulo, "YesNo", $icono) -eq "Yes") {
+            Escribir-Log "Reiniciando el equipo..."
+            Restart-Computer -Force
+        }
+    } else {
+        [void][System.Windows.MessageBox]::Show($msg, $o.Titulo, "OK", $icono)
+    }
+}
+
+# ---------------------------------------------------------------- Ajustes ya aplicados
+function Test-AjusteAplicado {
+    param($Item)
+    $regs = @($Item.registry | Where-Object { $_ })
+    $svcs = @($Item.service | Where-Object { $_ })
+    if ($regs.Count -eq 0 -and $svcs.Count -eq 0) { return $false }
+    Initialize-HKU
+    foreach ($r in $regs) {
+        $actual = $null
+        try {
+            if (Test-Path $r.Path) { $actual = (Get-ItemProperty -Path $r.Path -Name $r.Name -ErrorAction SilentlyContinue).($r.Name) }
+        } catch { }
+        if ($r.Value -eq "<RemoveEntry>") {
+            if ($null -ne $actual) { return $false }
+            continue
+        }
+        if ($null -eq $actual -or [string]$actual -ne [string]$r.Value) { return $false }
+    }
+    foreach ($sv in $svcs) {
+        $servicio = Get-Service -Name $sv.Name -ErrorAction SilentlyContinue
+        if ($servicio -and [string]$servicio.StartType -ne [string]$sv.StartupType) { return $false }
+    }
+    return $true
+}
+
+$script:ChkOcultar = New-Object System.Windows.Controls.CheckBox
+$script:ChkOcultar.Content = "Ocultar los ajustes que ya están aplicados en este equipo"
+$script:ChkOcultar.IsChecked = $true
+$script:ChkOcultar.Margin = "0,0,0,4"
+$script:TxtOcultos = New-Object System.Windows.Controls.TextBlock
+$script:TxtOcultos.Foreground = Get-Pincel "#6B7280"
+$script:TxtOcultos.TextWrapping = "Wrap"
+$script:TxtOcultos.Margin = "0,0,0,6"
+$ui.PanelAjustes.Children.Insert(0, $script:TxtOcultos)
+$ui.PanelAjustes.Children.Insert(0, $script:ChkOcultar)
+
+function Update-VistaAjustes {
+    $ocultar = [bool]$script:ChkOcultar.IsChecked
+    $ocultos = 0
+    foreach ($c in $script:CasillasAjustes) {
+        $it = $c.Tag
+        if ($it.Key -eq "WPFTweaksRestorePoint") { continue }
+        $info = $script:InfoAjuste[$it.Key]
+        $aplicado = Test-AjusteAplicado $it
+        $hecho = $script:HechosSesion.ContainsKey($it.Key)
+        if ($aplicado -or $hecho) {
+            $info.Estado.Text = if ($aplicado) { "$([char]0x2714) Ya aplicado en este equipo" } else { "$([char]0x2714) Aplicado en esta sesión" }
+            $info.Estado.Foreground = Get-Pincel "#1E7B3A"
+            $info.Estado.Visibility = "Visible"
+            $info.Borde.BorderBrush = Get-Pincel "#86EFAC"
+            if ($ocultar) {
+                $c.IsChecked = $false
+                $info.Borde.Visibility = "Collapsed"
+                $ocultos++
+            } else {
+                $info.Borde.Visibility = "Visible"
+            }
+        } else {
+            $info.Estado.Visibility = "Collapsed"
+            $info.Borde.BorderBrush = Get-Pincel "#E5E7EB"
+            $info.Borde.Visibility = "Visible"
+        }
+    }
+    $script:TxtOcultos.Text = if ($ocultos) { "$ocultos ajuste(s) ya aplicados están ocultos. Quita la marca de arriba para verlos o deshacerlos." } else { "" }
+    $script:TxtOcultos.Visibility = if ($ocultos) { "Visible" } else { "Collapsed" }
+}
+$script:ChkOcultar.Add_Click({ Update-VistaAjustes })
+
+function Test-AjusteVisible($c) { return ($script:InfoAjuste[$c.Tag.Key].Borde.Visibility -eq "Visible") }
+
+# ---------------------------------------------------------------- Presets de WinUtil
+$ExtrasB64 = '__EXTRAS_B64__'
+$script:Extras = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ExtrasB64)) | ConvertFrom-Json
+
+function Select-Preset {
+    param([string[]]$Claves)
+    foreach ($c in $script:CasillasAjustes) {
+        $c.IsChecked = ((($Claves -contains $c.Tag.Key) -or $c.Tag.Key -eq "WPFTweaksRestorePoint") -and (Test-AjusteVisible $c))
+    }
+    $n = @($script:CasillasAjustes | Where-Object { $_.IsChecked }).Count
+    $script:UI.TxtEstado.Text = "Preset seleccionado: $n ajuste(s) marcados (los ya aplicados se omiten)."
+}
+$ui.BtnPresetEstandar.Add_Click({ Select-Preset -Claves @($script:Extras.Presets.Standard) })
+$ui.BtnPresetMinimo.Add_Click({ Select-Preset -Claves @($script:Extras.Presets.Minimal) })
+
+# ---------------------------------------------------------------- Exportar / importar selección
+$ui.BtnExportar.Add_Click({
+    $datos = [ordered]@{
+        Ajustes      = @($script:CasillasAjustes | Where-Object { $_.IsChecked } | ForEach-Object { $_.Tag.Key })
+        Preferencias = @{}
+        Apps         = @($script:TarjetasApps | Where-Object { $_.Casilla.IsChecked } | ForEach-Object { $_.App.Id })
+    }
+    foreach ($c in $script:CasillasPref) { $datos.Preferencias[$c.Tag.Key] = [bool]$c.IsChecked }
+    $dlg = New-Object Microsoft.Win32.SaveFileDialog
+    $dlg.Filter = "Selección del optimizador (*.json)|*.json"
+    $dlg.FileName = "seleccion-optimizador.json"
+    if ($dlg.ShowDialog()) {
+        $datos | ConvertTo-Json -Depth 4 | Set-Content -Path $dlg.FileName -Encoding UTF8
+        Escribir-Log "Selección guardada en $($dlg.FileName)"
+        [void][System.Windows.MessageBox]::Show("Selección guardada. Usa 'Importar selección' en otro equipo para marcar lo mismo.", "Exportar", "OK", "Information")
+    }
+})
+
+$ui.BtnImportar.Add_Click({
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Filter = "Selección del optimizador (*.json)|*.json"
+    if (-not $dlg.ShowDialog()) { return }
+    try {
+        $datos = Get-Content -Path $dlg.FileName -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($c in $script:CasillasAjustes) { $c.IsChecked = (@($datos.Ajustes) -contains $c.Tag.Key) -and (Test-AjusteVisible $c) }
+        foreach ($t in $script:TarjetasApps) { $t.Casilla.IsChecked = (@($datos.Apps) -contains $t.App.Id) }
+        foreach ($c in $script:CasillasPref) {
+            $v = $datos.Preferencias.($c.Tag.Key)
+            if ($null -ne $v) { $c.IsChecked = [bool]$v }
+        }
+        Escribir-Log "Selección importada de $($dlg.FileName). Revisa las pestañas y pulsa Aplicar / Instalar."
+        [void][System.Windows.MessageBox]::Show("Selección importada. Aún no se aplicó nada: revisa Ajustes, Preferencias y Apps y pulsa sus botones.", "Importar", "OK", "Information")
+    } catch {
+        [void][System.Windows.MessageBox]::Show("No se pudo leer el archivo: $($_.Exception.Message)", "Importar", "OK", "Error")
+    }
+})
+
+# ---------------------------------------------------------------- Pestaña Configuración
+$pC = $script:UI.PanelConfig
+
+# Características de Windows
+[void]$pC.Children.Add((New-Titulo "Características de Windows" "Componentes opcionales de Windows. Al abrir esta pestaña se comprueba cuáles ya están activadas."))
+$script:FeaturesComprobadas = $false
+foreach ($f in @($script:Extras.Features)) {
+    New-TarjetaAccion -Panel $pC -Clave "FEAT:$($f.Key)" -Titulo $f.Nombre -TextoBoton "Activar" -Riesgo $f.Riesgo `
+        -Descripcion $f.Descripcion -Aviso $f.Aviso -Accion ({
+            $uid = [string]$this.Uid
+            $feat = @($script:Extras.Features | Where-Object { "FEAT:$($_.Key)" -eq $uid })[0]
+            if (-not $feat) { return }
+            if ($feat.Riesgo -ne "Bajo") {
+                if ([System.Windows.MessageBox]::Show("$($feat.Nombre)`r`n`r`n$($feat.Aviso)`r`n`r`n¿Continuar?", "Características", "YesNo", "Warning") -ne "Yes") { return }
+            }
+            Start-Pasos -Pasos @(New-PasoScript -Nombre $feat.Nombre -Codigo $feat.Script) -OfrecerReinicio
+        })
+    $script:TarjetaPorId["FEAT:$($f.Key)"].Boton.Uid = "FEAT:$($f.Key)"
+}
+
+function Start-ComprobarFeatures {
+    if ($script:Trabajo) { return }
+    $script:FeaturesComprobadas = $true
+    $lineas = foreach ($f in @($script:Extras.Features)) {
+        if (@($f.Features).Count) { "@{ K = 'FEAT:$($f.Key)'; F = @(" + ((@($f.Features) | ForEach-Object { "'$_'" }) -join ",") + ") }" }
+    }
+    $codigo = @"
+`$lista = @($($lineas -join ", "))
+foreach (`$x in `$lista) { Set-EstadoApp -Id `$x.K -Texto 'Comprobando...' -Tipo 'trabajo' }
+Write-Output 'Comprobando las características de Windows...'
+`$estado = @{}
+Get-WindowsOptionalFeature -Online -ErrorAction SilentlyContinue | ForEach-Object { `$estado[`$_.FeatureName] = [string]`$_.State }
+foreach (`$x in `$lista) {
+    `$faltan = @(`$x.F | Where-Object { -not `$estado.ContainsKey(`$_) })
+    `$apagadas = @(`$x.F | Where-Object { `$estado.ContainsKey(`$_) -and `$estado[`$_] -ne 'Enabled' })
+    if (`$faltan.Count -eq `$x.F.Count) { Set-EstadoApp -Id `$x.K -Texto 'No disponible en esta edición de Windows' -Tipo 'info' }
+    elseif (`$apagadas.Count -eq 0) { Set-EstadoApp -Id `$x.K -Texto 'Ya activada $([char]0x2714)' -Tipo 'ok' }
+    else { Set-EstadoApp -Id `$x.K -Texto '' -Tipo 'info' }
+}
+"@
+    Start-Pasos -Pasos @(New-PasoScript -Nombre "Comprobar características" -Codigo $codigo) -Silencioso
+}
+
+# Actualizaciones de Windows
+function Get-ModoUpdates {
+    $wu = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+    $au = Get-ItemProperty -Path "$wu\AU" -ErrorAction SilentlyContinue
+    $p  = Get-ItemProperty -Path $wu -ErrorAction SilentlyContinue
+    if ($au -and $au.NoAutoUpdate -eq 1) { return "Desactivadas" }
+    if ($p -and $p.DeferFeatureUpdatesPeriodInDays -eq 365) { return "Recomendado (solo seguridad)" }
+    return "Predeterminado de Windows"
+}
+[void]$pC.Children.Add((New-Titulo "Actualizaciones de Windows" ""))
+$script:TxtModoUpdates = New-Object System.Windows.Controls.TextBlock
+$script:TxtModoUpdates.FontWeight = "SemiBold"
+$script:TxtModoUpdates.Margin = "0,0,0,8"
+$script:TxtModoUpdates.Text = "Modo actual: " + (Get-ModoUpdates)
+[void]$pC.Children.Add($script:TxtModoUpdates)
+
+New-TarjetaAccion -Panel $pC -Titulo "Predeterminado de Windows" -TextoBoton "Aplicar" -Riesgo "Bajo" `
+    -Descripcion "Deja Windows Update como viene de fábrica. Úsalo también para deshacer los otros dos modos." -Aviso "" -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Actualizaciones: predeterminado" -Codigo $script:Extras.Updates.default) -OfrecerReinicio
+    }
+New-TarjetaAccion -Panel $pC -Titulo "Recomendado: solo seguridad" -TextoBoton "Aplicar" -Riesgo "Medio" `
+    -Descripcion "Recibe parches de seguridad (con 4 días de espera) y retrasa 1 año las actualizaciones grandes de versión. No instala drivers desde Windows Update." `
+    -Aviso "Tardarás en recibir funciones nuevas de Windows. Los drivers tendrás que actualizarlos tú (fabricante o apps)." -Accion {
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Actualizaciones: solo seguridad" -Codigo $script:Extras.Updates.security) -OfrecerReinicio
+    }
+New-TarjetaAccion -Panel $pC -Titulo "Desactivar actualizaciones" -TextoBoton "Desactivar" -Riesgo "Alto" `
+    -Descripcion "Detiene y desactiva los servicios y tareas de Windows Update." `
+    -Aviso "PELIGROSO: el equipo deja de recibir parches de seguridad y queda expuesto a virus y ataques. Solo para equipos aislados o casos muy concretos." -Accion {
+        $m = "Vas a DESACTIVAR Windows Update. El equipo dejará de recibir parches de seguridad hasta que elijas 'Predeterminado de Windows'.`r`n`r`n¿Seguro?"
+        if ([System.Windows.MessageBox]::Show($m, "Desactivar actualizaciones", "YesNo", "Warning") -eq "Yes") {
+            Start-Pasos -Pasos @(New-PasoScript -Nombre "Actualizaciones: desactivar" -Codigo $script:Extras.Updates.disable) -OfrecerReinicio
+        }
+    }
+
+# DNS
+[void]$pC.Children.Add((New-Titulo "Servidores DNS" "Cambia el DNS de las conexiones activas (Wi-Fi y cable)."))
+$filaDns = New-Object System.Windows.Controls.WrapPanel
+$filaDns.Margin = "0,0,0,6"
+$script:CmbDns = New-Object System.Windows.Controls.ComboBox
+$script:CmbDns.Width = 330
+$script:CmbDns.Margin = "0,0,8,4"
+[void]$script:CmbDns.Items.Add("Automático (el de tu router o proveedor)")
+foreach ($d in @($script:Extras.Dns)) { [void]$script:CmbDns.Items.Add($d.Nombre) }
+$script:CmbDns.SelectedIndex = 0
+$script:BtnDns = New-Object System.Windows.Controls.Button
+$script:BtnDns.Content = "Aplicar DNS"
+$script:BtnDns.Padding = "12,4"
+$script:BtnDns.Margin = "0,0,0,4"
+$script:BtnDns.Tag = $true
+[void]$filaDns.Children.Add($script:CmbDns)
+[void]$filaDns.Children.Add($script:BtnDns)
+[void]$pC.Children.Add($filaDns)
+$script:BotonesSeguridad += $script:BtnDns
+$txtDns = New-Object System.Windows.Controls.TextBlock
+$txtDns.TextWrapping = "Wrap"
+$txtDns.Foreground = Get-Pincel $script:Colores.Medio.Texto
+$txtDns.Margin = "0,0,0,10"
+$actualDns = ""
+try { $actualDns = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.ServerAddresses } | Select-Object -First 1).ServerAddresses -join ", " } catch { }
+$txtDns.Text = "DNS actual: $(if ($actualDns) { $actualDns } else { 'desconocido' }).  $([char]0x26A0) En oficinas con servidor o dominio propio NO lo cambies: dejarías de ver equipos y carpetas de la red."
+[void]$pC.Children.Add($txtDns)
+$script:BtnDns.Add_Click({
+    $i = $script:CmbDns.SelectedIndex
+    if ($i -le 0) {
+        $codigo = @'
+foreach ($a in (Get-NetAdapter | Where-Object { $_.Status -eq "Up" -and $_.HardwareInterface })) {
+    Set-DnsClientServerAddress -InterfaceIndex $a.ifIndex -ResetServerAddresses -ErrorAction Stop
+    Write-Output "DNS de '$($a.Name)': automático."
+}
+Clear-DnsClientCache -ErrorAction SilentlyContinue
+'@
+        $nombre = "Automático"
+    } else {
+        $d = @($script:Extras.Dns)[$i - 1]
+        $nombre = $d.Nombre
+        $codigo = @"
+foreach (`$a in (Get-NetAdapter | Where-Object { `$_.Status -eq 'Up' -and `$_.HardwareInterface })) {
+    Set-DnsClientServerAddress -InterfaceIndex `$a.ifIndex -ServerAddresses @('$($d.P)', '$($d.S)', '$($d.P6)', '$($d.S6)') -ErrorAction Stop
+    Write-Output "DNS de '`$(`$a.Name)': $($d.P), $($d.S)"
+}
+Clear-DnsClientCache -ErrorAction SilentlyContinue
+"@
+    }
+    Start-Pasos -Pasos @(New-PasoScript -Nombre "Cambiar DNS a $nombre" -Codigo $codigo)
+})
+
+# Paneles clásicos
+[void]$pC.Children.Add((New-Titulo "Paneles clásicos de Windows" "Accesos directos a las herramientas de siempre."))
+$panelBotones = New-Object System.Windows.Controls.WrapPanel
+$paneles = @(
+    @("Panel de control", "control"), @("Programas y características", "appwiz.cpl"), @("Administrador de dispositivos", "devmgmt.msc"),
+    @("Administración de discos", "diskmgmt.msc"), @("Administración de equipos", "compmgmt.msc"), @("Servicios", "services.msc"),
+    @("Conexiones de red", "ncpa.cpl"), @("Opciones de energía", "powercfg.cpl"), @("Impresoras", "shell:::{A8A91A66-3A7D-4424-8D24-04E180695C7A}"),
+    @("Sonido", "mmsys.cpl"), @("Ratón", "main.cpl"), @("Región", "intl.cpl"), @("Fecha y hora", "timedate.cpl"),
+    @("Propiedades del sistema", "sysdm.cpl"), @("Seguridad y mantenimiento", "wscui.cpl"), @("Firewall", "firewall.cpl"),
+    @("Visor de eventos", "eventvwr.msc"), @("Programador de tareas", "taskschd.msc"), @("Restaurar sistema", "rstrui.exe")
+)
+foreach ($pn in $paneles) {
+    $b = New-Object System.Windows.Controls.Button
+    $b.Content = $pn[0]
+    $b.Tag = $pn[1]
+    $b.Padding = "10,4"
+    $b.Margin = "0,0,6,6"
+    $b.Add_Click({
+        $cmd = [string]$this.Tag
+        try {
+            if ($cmd -like "shell:*") { Start-Process -FilePath "explorer.exe" -ArgumentList $cmd } else { Start-Process -FilePath $cmd }
+        } catch { Escribir-Log "No se pudo abrir ${cmd}: $($_.Exception.Message)" "ERROR" }
+    })
+    [void]$panelBotones.Children.Add($b)
+}
+[void]$pC.Children.Add($panelBotones)
+
+Update-VistaAjustes
+
+# ---------------------------------------------------------------- Trabajo en segundo plano
+$script:Trabajo = $null
+
+function Set-Ocupado([bool]$ocupado) {
+    foreach ($b in "BtnRecomendados","BtnLimpiar","BtnDeshacer","BtnPreferencias","BtnAplicar","BtnAppsInstalar","BtnAppsActualizar","BtnAppsDesinstalar","BtnAppsTodo","BtnAppsComprobar") {
+        $script:UI[$b].IsEnabled = -not $ocupado
+    }
+    foreach ($b in $script:BotonesSeguridad) {
+        $b.IsEnabled = (-not $ocupado) -and [bool]$b.Tag
+    }
+}
+
+function Start-Pasos {
+    param([object[]]$Pasos, [string]$Titulo = "", [switch]$Silencioso, [switch]$OfrecerReinicio)
+    if ($script:Trabajo) {
+        [void][System.Windows.MessageBox]::Show("Ya hay un proceso en marcha. Espera a que termine.", "Optimizador", "OK", "Information")
+        return
+    }
+    Set-Ocupado $true
+    $global:Estado.Progreso = 0
+    $global:Estado.Resumen = [hashtable]::Synchronized(@{ Ok = 0; Avisos = 0; Errores = 0; Total = @($Pasos).Count; Cancelado = $false })
+    $global:Estado.Hechos = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+    $script:OpcionesTrabajo = @{ Titulo = $(if ($Titulo) { $Titulo } elseif (@($Pasos).Count -eq 1) { @($Pasos)[0].Item.Nombre } else { "Proceso" }); Silencioso = [bool]$Silencioso; Reinicio = [bool]$OfrecerReinicio }
+
+    $rs = [runspacefactory]::CreateRunspace()
+    $rs.Open()
+    $rs.SessionStateProxy.SetVariable("Estado", $global:Estado)
+    $rs.SessionStateProxy.SetVariable("ArchivoLog", $global:ArchivoLog)
+
+    $ps = [PowerShell]::Create()
+    $ps.Runspace = $rs
+    [void]$ps.AddScript($script:MotorCodigo).Invoke()
+    $ps.Commands.Clear()
+
+    [void]$ps.AddScript({
+        param($Pasos)
+        $total = @($Pasos).Count
+        $i = 0
+        foreach ($p in $Pasos) {
+            $i++
+            $Estado.Progreso = [int](100 * ($i - 1) / [Math]::Max($total, 1))
+            $Estado.Texto = "($i/$total) $($p.Item.Nombre)"
+            $ok = Invoke-Ajuste -Item $p.Item -Deshacer $p.Deshacer
+            if ($ok) {
+                if ($global:avisos) { $Estado.Resumen.Avisos++ } else { $Estado.Resumen.Ok++ }
+                [void]$Estado.Hechos.Add("$($p.Item.Key)|$($p.Deshacer)")
+            } else {
+                $Estado.Resumen.Errores++
+            }
+            if (-not $ok -and $p.Item.Key -eq "WPFTweaksRestorePoint" -and -not $p.Deshacer) {
+                $Estado.Resumen.Cancelado = $true
+                Escribir-Log "No se pudo crear el punto de restauración. Por seguridad NO se aplicó nada más. Activa 'Protección del sistema' en C: e inténtalo otra vez." "ERROR"
+                $Estado.Texto = "Cancelado: no se pudo crear el punto de restauración."
+                $Estado.Progreso = 0
+                return
+            }
+        }
+        $Estado.Progreso = 100
+        $r = $Estado.Resumen
+        $Estado.Texto = "Terminado: $($r.Ok) correcto(s), $($r.Avisos) con avisos, $($r.Errores) con errores."
+        Escribir-Log "===== TERMINADO: $($r.Ok) correcto(s), $($r.Avisos) con avisos, $($r.Errores) con errores ====="
+    }).AddArgument($Pasos)
+
+    $script:Trabajo = @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() }
+}
+
+$temporizador = New-Object System.Windows.Threading.DispatcherTimer
+$temporizador.Interval = [TimeSpan]::FromMilliseconds(250)
+$temporizador.Add_Tick({
+    $linea = $null
+    $hubo = $false
+    while ($global:Estado.Cola.TryDequeue([ref]$linea)) {
+        $script:UI.TxtLog.AppendText($linea + "`r`n")
+        $hubo = $true
+    }
+    if ($hubo) { $script:UI.TxtLog.ScrollToEnd() }
+    if ($global:Estado.Texto) { $script:UI.TxtEstado.Text = $global:Estado.Texto }
+    $script:UI.Barra.Value = $global:Estado.Progreso
+    if ($global:Estado.Apps.Count) { Update-EstadosApps }
+
+    if ($script:Trabajo -and $script:Trabajo.Handle.IsCompleted) {
+        try { [void]$script:Trabajo.PS.EndInvoke($script:Trabajo.Handle) }
+        catch { Escribir-Log "Error inesperado: $($_.Exception.Message)" "ERROR" }
+        $script:Trabajo.PS.Dispose()
+        $script:Trabajo.RS.Close()
+        $script:Trabajo = $null
+        Set-Ocupado $false
+        Update-Preferencias
+        foreach ($h in @($global:Estado.Hechos)) {
+            $partes = $h -split "\|"
+            if ($partes[1] -eq "True") { $script:HechosSesion.Remove($partes[0]) } else { $script:HechosSesion[$partes[0]] = $true }
+        }
+        Update-VistaAjustes
+        if ($script:TxtModoUpdates) { $script:TxtModoUpdates.Text = "Modo actual: " + (Get-ModoUpdates) }
+        Show-ResumenTrabajo
+    }
+})
+$temporizador.Start()
+
+# ---------------------------------------------------------------- Botones
+function Get-Seleccionados {
+    return @($script:CasillasAjustes | Where-Object { $_.IsChecked } | ForEach-Object { $_.Tag })
+}
+
+$ui.BtnRecomendados.Add_Click({
+    foreach ($c in $script:CasillasAjustes) {
+        $c.IsChecked = ($c.Tag.Grupo -eq "Esenciales" -and $c.Tag.Riesgo -eq "Bajo" -and (Test-AjusteVisible $c))
+    }
+})
+
+$ui.BtnLimpiar.Add_Click({
+    foreach ($c in $script:CasillasAjustes) { $c.IsChecked = $false }
+})
+
+$ui.BtnRestaurar.Add_Click({ Start-Process "rstrui.exe" })
+
+$ui.BtnAplicar.Add_Click({
+    $sel = Get-Seleccionados
+    $sinPunto = @($sel | Where-Object { $_.Key -ne "WPFTweaksRestorePoint" })
+    if ($sinPunto.Count -eq 0) {
+        [void][System.Windows.MessageBox]::Show("Marca al menos un ajuste además del punto de restauración.", "Optimizador", "OK", "Information")
+        return
+    }
+    $tienePunto = @($sel | Where-Object { $_.Key -eq "WPFTweaksRestorePoint" }).Count -gt 0
+    $altos  = @($sinPunto | Where-Object { $_.Riesgo -eq "Alto" })
+    $medios = @($sinPunto | Where-Object { $_.Riesgo -eq "Medio" })
+
+    $msg = "Vas a aplicar $($sinPunto.Count) ajuste(s).`r`n"
+    if (-not $tienePunto) {
+        $msg += "`r`n$([char]0x26A0) NO has marcado 'Crear punto de restauración'. Si algo sale mal será más difícil volver atrás.`r`n"
+    }
+    if ($altos.Count) {
+        $msg += "`r`nRIESGO ALTO:`r`n"
+        foreach ($a in $altos) { $msg += " - $($a.Nombre): $($a.Aviso)`r`n" }
+    }
+    if ($medios.Count) {
+        $msg += "`r`nRiesgo medio:`r`n"
+        foreach ($m in $medios) { $msg += " - $($m.Nombre)`r`n" }
+    }
+    $msg += "`r`n¿Continuar?"
+    $icono = if ($altos.Count -or -not $tienePunto) { "Warning" } else { "Question" }
+    $r = [System.Windows.MessageBox]::Show($msg, "Confirmar cambios", "YesNo", $icono)
+    if ($r -ne "Yes") { return }
+
+    $pasos = @()
+    if ($tienePunto) {
+        $pasos += [pscustomobject]@{ Item = ($sel | Where-Object { $_.Key -eq "WPFTweaksRestorePoint" } | Select-Object -First 1); Deshacer = $false }
+    }
+    foreach ($s in $sinPunto) { $pasos += [pscustomobject]@{ Item = $s; Deshacer = $false } }
+    Start-Pasos -Pasos $pasos -Titulo "Aplicar ajustes" -OfrecerReinicio
+})
+
+$ui.BtnDeshacer.Add_Click({
+    $sel = @(Get-Seleccionados | Where-Object { $_.Key -ne "WPFTweaksRestorePoint" })
+    if ($sel.Count -eq 0) {
+        [void][System.Windows.MessageBox]::Show("Marca los ajustes que quieres deshacer.", "Optimizador", "OK", "Information")
+        return
+    }
+    $sinUndo = @($sel | Where-Object { -not $_.UndoScript -and -not $_.registry -and -not $_.service })
+    $msg = "Se intentará devolver a su valor original $($sel.Count) ajuste(s)."
+    if ($sinUndo.Count) {
+        $msg += "`r`n`r`nEstos no se pueden deshacer desde aquí (usa Restaurar sistema o reinstala):`r`n"
+        foreach ($s in $sinUndo) { $msg += " - $($s.Nombre)`r`n" }
+    }
+    $msg += "`r`n¿Continuar?"
+    if ([System.Windows.MessageBox]::Show($msg, "Deshacer", "YesNo", "Question") -ne "Yes") { return }
+    Start-Pasos -Pasos @($sel | ForEach-Object { [pscustomobject]@{ Item = $_; Deshacer = $true } }) -Titulo "Deshacer ajustes" -OfrecerReinicio
+})
+
+$ui.BtnPreferencias.Add_Click({
+    $pasos = @()
+    $altos = @()
+    foreach ($c in $script:CasillasPref) {
+        $ahora = [bool]$c.IsChecked
+        if ([string]$ahora -ne $c.Uid) {
+            # Activar = aplicar el valor del ajuste; desactivar = volver al original
+            $pasos += [pscustomobject]@{ Item = $c.Tag; Deshacer = (-not $ahora) }
+            if ($c.Tag.Riesgo -eq "Alto") { $altos += $c.Tag }
+        }
+    }
+    if ($pasos.Count -eq 0) {
+        [void][System.Windows.MessageBox]::Show("No has cambiado ninguna preferencia.", "Optimizador", "OK", "Information")
+        return
+    }
+    if ($altos.Count) {
+        $msg = "Has cambiado preferencias de RIESGO ALTO:`r`n"
+        foreach ($a in $altos) { $msg += " - $($a.Nombre): $($a.Aviso)`r`n" }
+        $msg += "`r`n¿Continuar?"
+        if ([System.Windows.MessageBox]::Show($msg, "Confirmar", "YesNo", "Warning") -ne "Yes") { return }
+    }
+    Start-Pasos -Pasos $pasos -Titulo "Aplicar preferencias"
+})
+
+$script:Ventana.Add_Closing({
+    param($origen, $evento)
+    if ($script:Trabajo) {
+        [void][System.Windows.MessageBox]::Show("Espera a que termine el trabajo en curso antes de cerrar.", "Optimizador", "OK", "Warning")
+        $evento.Cancel = $true
+    }
+})
+
+Escribir-Log "Optimizador iniciado. Registro: $global:ArchivoLog"
+if ($Prueba) {
+    $temporizador.Stop()
+    return
+}
+[void]$script:Ventana.ShowDialog()
+$temporizador.Stop()

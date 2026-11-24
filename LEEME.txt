@@ -1,0 +1,85 @@
+OPTIMIZADOR DE WINDOWS EN ESPAÑOL
+=================================
+
+Cómo abrirlo
+  1. Deja OptimizadorES.ps1 e Iniciar-Optimizador.bat en la misma carpeta.
+  2. Doble clic en Iniciar-Optimizador.bat y acepta el aviso de administrador.
+
+Qué tiene
+  - Pestaña "Ajustes": 41 ajustes (esenciales y avanzados), cada uno con su nivel
+    de riesgo (bajo / medio / ALTO) y un aviso de qué puede dejar de funcionar.
+  - Pestaña "Preferencias": 24 interruptores (modo oscuro, extensiones, etc.)
+    que muestran cómo está tu Windows ahora.
+  - Pestaña "Apps": 66 apps en español por categorías (navegadores, oficina y PDF,
+    comunicación, acceso remoto, diagnóstico, runtimes...). Instalar, actualizar o
+    desinstalar con winget, y "Actualizar TODAS las apps del equipo". Cada app
+    muestra su icono, si ya está instalada o tiene actualización, y una barra con
+    el progreso de descarga, instalación o desinstalación.
+  - Pestaña "Reparaciones": red, DNS, Windows Update, impresora atascada, Tienda,
+    winget, iconos y hora.
+  - Pestaña "Informe del equipo": resumen en texto (hardware, discos, batería,
+    Windows, activación, antivirus, drivers con error, errores críticos) que se
+    guarda en %LOCALAPPDATA%\OptimizadorES\Informes y en el Escritorio.
+  - Pestaña "Configuración" (como la de WinUtil): características de Windows
+    (.NET 3.5, Hyper-V, WSL, Sandbox, NFS...), modo de Windows Update
+    (predeterminado / solo seguridad / desactivar), cambio de DNS y paneles
+    clásicos de Windows.
+  - Los ajustes ya aplicados se ocultan solos (se pueden mostrar para deshacerlos).
+    Al terminar cualquier proceso aparece un resumen y, si hace falta, ofrece reiniciar.
+  - Presets Estándar y Mínimo de WinUtil, y Exportar/Importar selección para
+    repetir la misma configuración en otros equipos.
+  - "Deshacer" devuelve cada ajuste al valor exacto que tenía tu equipo antes
+    (se guarda en %LOCALAPPDATA%\OptimizadorES\respaldo-ajustes.json al aplicar).
+  - Pestaña "Seguridad": muestra tu antivirus (p. ej. ESET), análisis con Defender
+    si está activo, segunda opinión con Microsoft Safety Scanner, reparar Windows
+    (DISM + SFC) y lista de programas que arrancan solos.
+  - Pestaña "Riesgos y ayuda": explicación de los niveles y cómo volver atrás.
+  - Antes de aplicar, siempre se crea un punto de restauración. Si no se puede
+    crear, no se aplica nada.
+  - Antes de aplicar ajustes de riesgo medio o alto, se muestra una confirmación
+    con los avisos.
+  - Botón "Deshacer seleccionados" y botón para abrir Restaurar sistema.
+  - Registro de todo lo hecho en %LOCALAPPDATA%\OptimizadorES\
+
+Créditos y licencia
+  Los ajustes técnicos vienen de WinUtil de Chris Titus Tech
+  (https://github.com/ChrisTitusTech/winutil), licencia MIT. El aviso de licencia
+  completo está al principio de OptimizadorES.ps1 y debe mantenerse si lo compartes.
+  Se usa bajo tu responsabilidad, sin garantía.
+
+LIBERAR RAM (LiberarRAM.ps1)
+============================
+
+Cómo abrirlo
+  Doble clic en Iniciar-LiberarRAM.bat y acepta el aviso de administrador.
+  Es un menú en consola, independiente del optimizador grande.
+
+Opciones
+  1. Estado de la memoria: RAM en uso, módulos y ranuras libres, archivo de
+     paginación y los 15 programas que más RAM gastan.
+  2. Liberar RAM ahora: vacía la caché "en espera" y recorta la memoria de los
+     procesos. Muestra cuánta RAM libre había antes y después.
+  3. Cerrar programas abiertos en segundo plano (eliges cuáles por número).
+  4. Elegir qué programas arrancan con Windows (igual que el Administrador de
+     tareas > Inicio; el programa sigue instalado).
+  5. Poner en MANUAL servicios que no hacen falta siempre (telemetría, Xbox, fax,
+     mapas...). SysMain y Windows Search están marcados como riesgo medio.
+  6. Evitar que Edge, Chrome, Widgets, Copilot y apps de la Tienda se queden
+     abiertos en segundo plano.
+  7. Memoria virtual: si el archivo de paginación está en manual o desactivado,
+     lo deja en automático (lo recomendado).
+  8. Optimización recomendada: hace 6, 5 (solo riesgo bajo), 7 y 2 de una vez.
+  9. Revertir: deja todo como estaba antes de usar el script.
+ 10. Crea un acceso directo "Liberar RAM" en el escritorio (hace la opción 2
+     con un doble clic).
+
+Seguridad
+  - Antes del primer cambio se crea un punto de restauración.
+  - Cada valor original se guarda en %LOCALAPPDATA%\OptimizadorES\RAM\respaldo.json
+    y la opción 9 lo restaura. El registro de lo hecho queda en la misma carpeta.
+
+Lo que conviene saber
+  - Lo que más RAM gana de verdad son las opciones 4, 5 y 6 (menos cosas abiertas).
+    La opción 2 es un alivio momentáneo: los programas vuelven a tomar memoria al usarlos.
+  - Con 8 GB o menos, la mejora más grande suele ser ampliar a 16 GB si la laptop
+    tiene ranura libre (la opción 1 te dice cuántas ranuras hay ocupadas).

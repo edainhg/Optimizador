@@ -1,0 +1,38 @@
+name: Pruebas
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Windows (PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Pester 5
+        shell: powershell
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.5.0 -Force -SkipPublisherCheck -Scope CurrentUser
+
+      - name: Ejecutar pruebas
+        shell: powershell
+        run: |
+          Import-Module Pester -MinimumVersion 5.5.0
+          $config = New-PesterConfiguration
+          $config.Run.Path = "tests"
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = "Detailed"
+          $config.TestResult.Enabled = $true
+          $config.TestResult.OutputPath = "resultados-pruebas.xml"
+          Invoke-Pester -Configuration $config
+
+      - name: Guardar resultados
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultados-pruebas
+          path: resultados-pruebas.xml
