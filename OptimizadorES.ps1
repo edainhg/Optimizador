@@ -768,10 +768,10 @@ foreach ($g in $grupos) {
 $script:CasillasPref = @()
 function Update-Preferencias {
     foreach ($c in $script:CasillasPref) {
-        $estado = $false
-        try { $estado = Get-EstadoToggle -Item $c.Tag } catch { }
-        $c.IsChecked = $estado
-        $c.Uid = [string]$estado   # estado inicial, para saber qué cambió
+        $activo = $false
+        try { $activo = Get-EstadoToggle -Item $c.Tag } catch { }
+        $c.IsChecked = $activo
+        $c.Uid = [string]$activo   # estado inicial, para saber qué cambió
     }
 }
 foreach ($item in ($script:Ajustes | Where-Object { $_.Grupo -eq "Preferencias" })) {
@@ -941,9 +941,10 @@ if ($script:Antivirus.Count -eq 0) {
     $resumen.Text = "No se pudo detectar qué antivirus tienes."
 } else {
     $partes = foreach ($a in $script:Antivirus) {
-        $estado = if ($a.Activo) { "activo" } else { "desactivado" }
+        # Ojo: no llamar a esta variable $estado; pisaría $global:Estado (sin él no hay registro ni avisos)
+        $estadoAv = if ($a.Activo) { "activo" } else { "desactivado" }
         $firmas = if ($a.AlDia) { "firmas al día" } else { "firmas DESACTUALIZADAS" }
-        "$($a.Nombre) ($estado, $firmas)"
+        "$($a.Nombre) ($estadoAv, $firmas)"
     }
     $resumen.Text = "Antivirus detectado: " + ($partes -join "; ") + ". Microsoft Defender está en modo: $($script:ModoDefender)."
 }
@@ -1714,11 +1715,11 @@ function Start-ComprobarFeatures {
 `$lista = @($($lineas -join ", "))
 foreach (`$x in `$lista) { Set-EstadoApp -Id `$x.K -Texto 'Comprobando...' -Tipo 'trabajo' }
 Write-Output 'Comprobando las características de Windows...'
-`$estado = @{}
-Get-WindowsOptionalFeature -Online -ErrorAction SilentlyContinue | ForEach-Object { `$estado[`$_.FeatureName] = [string]`$_.State }
+`$featEstado = @{}
+Get-WindowsOptionalFeature -Online -ErrorAction SilentlyContinue | ForEach-Object { `$featEstado[`$_.FeatureName] = [string]`$_.State }
 foreach (`$x in `$lista) {
-    `$faltan = @(`$x.F | Where-Object { -not `$estado.ContainsKey(`$_) })
-    `$apagadas = @(`$x.F | Where-Object { `$estado.ContainsKey(`$_) -and `$estado[`$_] -ne 'Enabled' })
+    `$faltan = @(`$x.F | Where-Object { -not `$featEstado.ContainsKey(`$_) })
+    `$apagadas = @(`$x.F | Where-Object { `$featEstado.ContainsKey(`$_) -and `$featEstado[`$_] -ne 'Enabled' })
     if (`$faltan.Count -eq `$x.F.Count) { Set-EstadoApp -Id `$x.K -Texto 'No disponible en esta edición de Windows' -Tipo 'info' }
     elseif (`$apagadas.Count -eq 0) { Set-EstadoApp -Id `$x.K -Texto 'Ya activada $([char]0x2714)' -Tipo 'ok' }
     else { Set-EstadoApp -Id `$x.K -Texto '' -Tipo 'info' }

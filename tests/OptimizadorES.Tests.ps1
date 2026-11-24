@@ -1,4 +1,4 @@
-# Pruebas automáticas del Optimizador ES (Pester 5, Windows PowerShell 5.1).
+﻿# Pruebas automáticas del Optimizador ES (Pester 5, Windows PowerShell 5.1).
 # Se ejecutan en GitHub Actions en un equipo Windows limpio (.github/workflows/pruebas.yml).
 
 BeforeAll {
@@ -22,6 +22,21 @@ Describe "Sintaxis de los scripts" {
         if (-not (Test-Path $script:ArchivoRam)) { Set-ItResult -Skipped -Because "no está en el repositorio" ; return }
         $errores = Test-Sintaxis (Get-Content -LiteralPath $script:ArchivoRam -Raw -Encoding UTF8)
         ($errores | ForEach-Object { "$($_.Extent.StartLineNumber): $($_.Message)" }) | Should -BeNullOrEmpty
+    }
+    It "Ninguna variable pisa a las globales compartidas (PowerShell no distingue mayúsculas)" {
+        # Con -File el script corre en el ámbito global: '$estado = ...' sustituía a $global:Estado
+        # y la ventana se quedaba sin registro, sin barra y sin resumen.
+        $codigo = Get-Content -LiteralPath $script:Archivo -Raw -Encoding UTF8
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($codigo, [ref]$null, [ref]$null)
+        $globales = "Estado", "ArchivoLog", "Trabajo", "Ajustes", "Ventana", "MotorCodigo"
+        $choques = $ast.FindAll({
+            param($n)
+            $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $n.Left.VariablePath.IsUnqualified -and
+            $globales -contains $n.Left.VariablePath.UserPath
+        }, $true) | ForEach-Object { "Línea $($_.Extent.StartLineNumber): $($_.Extent.Text)" }
+        $choques | Should -BeNullOrEmpty
     }
     It "Los archivos se guardan con BOM UTF-8 (si no, Windows PowerShell rompe las tildes)" {
         $bytes = [System.IO.File]::ReadAllBytes($script:Archivo)[0..2]
