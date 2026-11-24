@@ -78,11 +78,34 @@ Describe "Carga completa en modo prueba" {
         foreach ($f in @($script:Extras.Features)) { if ((Test-Sintaxis $f.Script).Count) { $malos += "FEAT:$($f.Key)" } }
         foreach ($u in "default", "security", "disable") { if ((Test-Sintaxis $script:Extras.Updates.$u).Count) { $malos += "Updates:$u" } }
         foreach ($v in "codigoDefender", "codigoSafetyScanner", "codigoReparar", "codigoArranque", "fixRed", "fixDns", "fixUpdate",
-                       "fixImpresion", "fixTienda", "fixWinget", "fixIconos", "fixHora", "codigoInforme", "codigoBateria", "MotorCodigo") {
+                       "fixImpresion", "fixTienda", "fixWinget", "fixIconos", "fixHora", "codigoInforme", "codigoBateria", "MotorCodigo",
+                       "codigoLiberarRam", "codigoPaginacion", "codigoAnalisis") {
             $c = Get-Variable -Name $v -Scope Script -ValueOnly -ErrorAction SilentlyContinue
             if (-not $c) { $malos += "$v (no existe)" } elseif ((Test-Sintaxis $c).Count) { $malos += $v }
         }
         $malos | Should -BeNullOrEmpty
+    }
+
+    It "Tiene las pestañas Inicio y RAM y disco" {
+        $script:Ventana.FindName("TabInicio") | Should -Not -BeNullOrEmpty
+        $script:Ventana.FindName("TabRendimiento") | Should -Not -BeNullOrEmpty
+    }
+
+    It "El análisis del equipo encuentra cosas y las muestra en tarjetas" {
+        $global:Estado.Analisis = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+        $global:Estado.Metricas = [hashtable]::Synchronized(@{})
+        & ([scriptblock]::Create($script:codigoAnalisis)) | Out-Null
+        @($global:Estado.Analisis).Count | Should -BeGreaterThan 0
+        $global:Estado.Metricas.DiscoTxt | Should -Not -BeNullOrEmpty
+        { Show-Analisis } | Should -Not -Throw
+        $script:PanelHallazgos.Children.Count | Should -BeGreaterThan 0
+        $script:IndSalud.Valor.Text | Should -Match "/ 100"
+    }
+
+    It "Muestra la RAM en uso y la lista de programas" {
+        { Update-IndicadorRam } | Should -Not -Throw
+        $script:TxtRamGrande.Text | Should -Match "GB en uso"
+        { Update-ListaProcesos } | Should -Not -Throw
     }
 
     It "Los IDs de apps no se repiten" {

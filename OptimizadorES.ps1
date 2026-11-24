@@ -514,33 +514,143 @@ function Get-EstadoToggle {
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Optimizador de Windows (en español)" Width="1040" Height="760"
-        MinWidth="760" MinHeight="560" WindowStartupLocation="CenterScreen"
-        Background="#F4F5F7" FontFamily="Segoe UI" FontSize="13">
+        Title="Optimizador de Windows (en español)" Width="1180" Height="800"
+        MinWidth="900" MinHeight="580" WindowStartupLocation="CenterScreen"
+        Background="#EEF1F5" FontFamily="Segoe UI" FontSize="13">
+  <Window.Resources>
+    <Style TargetType="Button">
+      <Setter Property="Background" Value="#FFFFFF"/>
+      <Setter Property="Foreground" Value="#1F2937"/>
+      <Setter Property="BorderBrush" Value="#D1D5DB"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="12,6"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="B" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="B" Property="BorderBrush" Value="#2563EB"/>
+                <Setter TargetName="B" Property="Opacity" Value="0.92"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="B" Property="Opacity" Value="0.75"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="B" Property="Opacity" Value="0.45"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="Primario" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Background" Value="#2563EB"/>
+      <Setter Property="Foreground" Value="White"/>
+      <Setter Property="BorderBrush" Value="#1D4ED8"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+    <Style TargetType="TextBox">
+      <Setter Property="BorderBrush" Value="#D1D5DB"/>
+      <Setter Property="Padding" Value="6,4"/>
+    </Style>
+    <Style TargetType="TabItem">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TabItem">
+            <Border x:Name="Fondo" Background="Transparent" CornerRadius="6" Margin="0,1" Padding="12,9">
+              <Grid>
+                <Border x:Name="Marca" Width="3" HorizontalAlignment="Left" Margin="-12,0,0,0" CornerRadius="2"
+                        Background="#2563EB" Visibility="Collapsed"/>
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock x:Name="Icono" Text="{Binding Tag, RelativeSource={RelativeSource TemplatedParent}}"
+                             FontFamily="Segoe MDL2 Assets" FontSize="15" Width="28" VerticalAlignment="Center" Foreground="#6B7280"/>
+                  <TextBlock x:Name="Texto" Text="{Binding Header, RelativeSource={RelativeSource TemplatedParent}}"
+                             VerticalAlignment="Center" Foreground="#374151" FontSize="13.5"/>
+                </StackPanel>
+              </Grid>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Fondo" Property="Background" Value="#EEF2F7"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="Fondo" Property="Background" Value="#E3ECFD"/>
+                <Setter TargetName="Marca" Property="Visibility" Value="Visible"/>
+                <Setter TargetName="Texto" Property="Foreground" Value="#1D4ED8"/>
+                <Setter TargetName="Texto" Property="FontWeight" Value="SemiBold"/>
+                <Setter TargetName="Icono" Property="Foreground" Value="#2563EB"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="TabControl">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TabControl">
+            <Border Background="#F7F8FA" BorderBrush="#E2E6EC" BorderThickness="1" CornerRadius="10">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="200"/>
+                  <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Border Background="#FFFFFF" BorderBrush="#E2E6EC" BorderThickness="0,0,1,0" CornerRadius="10,0,0,10">
+                  <StackPanel IsItemsHost="True" Margin="8,12"/>
+                </Border>
+                <ContentPresenter Grid.Column="1" ContentSource="SelectedContent" Margin="4"/>
+              </Grid>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
   <Grid Margin="16">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="*"/>
       <RowDefinition Height="Auto"/>
-      <RowDefinition Height="140"/>
+      <RowDefinition Height="120"/>
     </Grid.RowDefinitions>
 
-    <DockPanel Grid.Row="0" Margin="0,0,0,12">
-    <Image x:Name="ImgLogo" DockPanel.Dock="Left" Width="44" Height="44" Margin="0,0,12,0" VerticalAlignment="Top"/>
-    <StackPanel>
-      <TextBlock Text="Optimizador de Windows" FontSize="24" FontWeight="SemiBold" Foreground="#1F2937"/>
-      <TextBlock TextWrapping="Wrap" Foreground="#4B5563" Margin="0,4,0,0"
-                 Text="Marca los ajustes que quieras y pulsa Aplicar. Cada opción indica su nivel de riesgo y qué puede dejar de funcionar. Siempre se crea primero un punto de restauración."/>
-    </StackPanel>
-    </DockPanel>
+    <Border Grid.Row="0" CornerRadius="10" Padding="18,14" Margin="0,0,0,12">
+      <Border.Background>
+        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+          <GradientStop Color="#1E3A8A" Offset="0"/>
+          <GradientStop Color="#2563EB" Offset="1"/>
+        </LinearGradientBrush>
+      </Border.Background>
+      <DockPanel>
+        <Image x:Name="ImgLogo" DockPanel.Dock="Left" Width="44" Height="44" Margin="0,0,14,0" VerticalAlignment="Center"/>
+        <TextBlock x:Name="TxtEquipo" DockPanel.Dock="Right" Foreground="#DBEAFE" FontSize="12" TextAlignment="Right"
+                   VerticalAlignment="Center" Margin="16,0,0,0"/>
+        <StackPanel VerticalAlignment="Center">
+          <TextBlock Text="Optimizador de Windows" FontSize="22" FontWeight="SemiBold" Foreground="White"/>
+          <TextBlock TextWrapping="Wrap" Foreground="#DBEAFE" Margin="0,2,0,0"
+                     Text="Analiza, limpia y ajusta Windows. Cada opción indica su nivel de riesgo y antes de cambiar nada se crea un punto de restauración."/>
+        </StackPanel>
+      </DockPanel>
+    </Border>
 
-    <TabControl Grid.Row="1" x:Name="Pestanas" Background="White" Padding="0">
-      <TabItem Header="  Ajustes  ">
+    <TabControl Grid.Row="1" x:Name="Pestanas">
+      <TabItem x:Name="TabInicio" Header="Inicio" Tag="&#xE80F;">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelInicio" Margin="14"/>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem x:Name="TabAjustes" Header="Ajustes" Tag="&#xE713;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel x:Name="PanelAjustes" Margin="12"/>
         </ScrollViewer>
       </TabItem>
-      <TabItem Header="  Preferencias  ">
+      <TabItem x:Name="TabPreferencias" Header="Preferencias" Tag="&#xE771;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel Margin="12">
             <TextBlock TextWrapping="Wrap" Foreground="#4B5563" Margin="0,0,0,10"
@@ -549,12 +659,12 @@ $xaml = @'
           </StackPanel>
         </ScrollViewer>
       </TabItem>
-      <TabItem Header="  Apps  ">
+      <TabItem x:Name="TabApps" Header="Apps" Tag="&#xE71D;">
         <DockPanel>
           <WrapPanel DockPanel.Dock="Top" Margin="12,10,12,4">
             <TextBlock Text="Buscar:" VerticalAlignment="Center" Margin="0,0,6,4"/>
             <TextBox x:Name="TxtBuscarApp" Width="200" Padding="4,3" Margin="0,0,12,4"/>
-            <Button x:Name="BtnAppsInstalar" Content="Instalar seleccionadas" Padding="12,5" Margin="0,0,6,4" Background="#2563EB" Foreground="White" FontWeight="SemiBold"/>
+            <Button x:Name="BtnAppsInstalar" Content="Instalar seleccionadas" Padding="12,5" Margin="0,0,6,4" Style="{StaticResource Primario}"/>
             <Button x:Name="BtnAppsActualizar" Content="Actualizar seleccionadas" Padding="12,5" Margin="0,0,6,4"/>
             <Button x:Name="BtnAppsDesinstalar" Content="Desinstalar seleccionadas" Padding="12,5" Margin="0,0,6,4"/>
             <Button x:Name="BtnAppsTodo" Content="Actualizar TODAS las apps del equipo" Padding="12,5" Margin="0,0,6,4"/>
@@ -569,27 +679,32 @@ $xaml = @'
           </ScrollViewer>
         </DockPanel>
       </TabItem>
-      <TabItem Header="  Configuración  ">
+      <TabItem x:Name="TabRendimiento" Header="RAM y disco" Tag="&#xE9D9;">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelRendimiento" Margin="14"/>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem x:Name="TabConfig" Header="Configuración" Tag="&#xE912;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel x:Name="PanelConfig" Margin="12"/>
         </ScrollViewer>
       </TabItem>
-      <TabItem Header="  Seguridad  ">
+      <TabItem x:Name="TabSeguridad" Header="Seguridad" Tag="&#xEA18;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel x:Name="PanelSeguridad" Margin="12"/>
         </ScrollViewer>
       </TabItem>
-      <TabItem Header="  Reparaciones  ">
+      <TabItem x:Name="TabReparaciones" Header="Reparaciones" Tag="&#xE90F;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel x:Name="PanelReparaciones" Margin="12"/>
         </ScrollViewer>
       </TabItem>
-      <TabItem Header="  Informe del equipo  ">
+      <TabItem x:Name="TabInforme" Header="Informe del equipo" Tag="&#xE9F9;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel x:Name="PanelInforme" Margin="12"/>
         </ScrollViewer>
       </TabItem>
-      <TabItem Header="  Riesgos y ayuda  ">
+      <TabItem x:Name="TabAyuda" Header="Riesgos y ayuda" Tag="&#xE897;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel x:Name="PanelAyuda" Margin="16"/>
         </ScrollViewer>
@@ -612,9 +727,8 @@ $xaml = @'
         <Button x:Name="BtnImportar" Content="Importar selección" Padding="12,6" Margin="0,0,8,4"/>
       </WrapPanel>
       <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-        <Button x:Name="BtnPreferencias" Content="Aplicar preferencias" Padding="14,6" Margin="0,0,8,4"/>
-        <Button x:Name="BtnAplicar" Content="Aplicar seleccionados" Padding="18,6" Margin="0,0,0,4"
-                Background="#2563EB" Foreground="White" FontWeight="SemiBold" BorderBrush="#1D4ED8"/>
+        <Button x:Name="BtnPreferencias" Content="Aplicar preferencias" Padding="14,6" Margin="0,0,8,4" Style="{StaticResource Primario}"/>
+        <Button x:Name="BtnAplicar" Content="Aplicar seleccionados" Padding="18,6" Margin="0,0,0,4" Style="{StaticResource Primario}"/>
       </StackPanel>
     </Grid>
 
@@ -627,9 +741,11 @@ $xaml = @'
         <TextBlock x:Name="TxtEstado" DockPanel.Dock="Left" Foreground="#374151" Text="Listo."/>
         <ProgressBar x:Name="Barra" Height="8" Margin="12,0,0,0" Minimum="0" Maximum="100" Value="0"/>
       </DockPanel>
-      <TextBox x:Name="TxtLog" Grid.Row="1" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
-               VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
-               Background="#111827" Foreground="#E5E7EB" BorderThickness="0" Padding="8"/>
+      <Border Grid.Row="1" CornerRadius="8" Background="#111827" Padding="2">
+        <TextBox x:Name="TxtLog" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
+                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                 Background="#111827" Foreground="#E5E7EB" BorderThickness="0" Padding="8"/>
+      </Border>
     </Grid>
   </Grid>
 </Window>
@@ -638,7 +754,7 @@ $xaml = @'
 $lector = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
 $script:Ventana = [Windows.Markup.XamlReader]::Load($lector)
 $ui = @{}
-foreach ($n in "PanelAjustes","PanelPreferencias","PanelAyuda","PanelSeguridad","PanelApps","TxtBuscarApp","BtnAppsInstalar","BtnAppsActualizar","BtnAppsDesinstalar","BtnAppsTodo","BtnAppsLimpiar","BtnAppsComprobar","BtnAppsActualizables","BtnAppsPanel","TxtWinget","PanelReparaciones","PanelInforme","PanelConfig","BtnPresetEstandar","BtnPresetMinimo","BtnExportar","BtnImportar","BtnRecomendados","BtnLimpiar","BtnDeshacer","BtnRestaurar","BtnPreferencias","BtnAplicar","TxtEstado","Barra","TxtLog","Pestanas","ImgLogo") {
+foreach ($n in "PanelAjustes","PanelPreferencias","PanelAyuda","PanelSeguridad","PanelApps","TxtBuscarApp","BtnAppsInstalar","BtnAppsActualizar","BtnAppsDesinstalar","BtnAppsTodo","BtnAppsLimpiar","BtnAppsComprobar","BtnAppsActualizables","BtnAppsPanel","TxtWinget","PanelReparaciones","PanelInforme","PanelConfig","BtnPresetEstandar","BtnPresetMinimo","BtnExportar","BtnImportar","BtnRecomendados","BtnLimpiar","BtnDeshacer","BtnRestaurar","BtnPreferencias","BtnAplicar","TxtEstado","Barra","TxtLog","Pestanas","ImgLogo","PanelInicio","PanelRendimiento","TxtEquipo") {
     $ui[$n] = $script:Ventana.FindName($n)
 }
 $script:UI = $ui
@@ -662,11 +778,11 @@ function New-Tarjeta {
 
     $borde = New-Object System.Windows.Controls.Border
     $borde.Background = Get-Pincel "#FFFFFF"
-    $borde.BorderBrush = Get-Pincel "#E5E7EB"
+    $borde.BorderBrush = Get-Pincel "#E2E6EC"
     $borde.BorderThickness = 1
-    $borde.CornerRadius = 6
-    $borde.Padding = "12,8"
-    $borde.Margin = "0,0,0,6"
+    $borde.CornerRadius = 8
+    $borde.Padding = "14,10"
+    $borde.Margin = "0,0,0,8"
 
     $pila = New-Object System.Windows.Controls.StackPanel
 
@@ -884,7 +1000,7 @@ Write-Output "Si ves algo que no reconoces, búscalo en Internet antes de borrar
 '@
 
 function New-TarjetaAccion {
-    param([string]$Titulo, [string]$Descripcion, [string]$Riesgo, [string]$Aviso, [string]$TextoBoton, [scriptblock]$Accion, [bool]$Permitido = $true, [string]$Motivo = "", $Panel = $null, [string]$Clave = "")
+    param([string]$Titulo, [string]$Descripcion, [string]$Riesgo, [string]$Aviso, [string]$TextoBoton, [scriptblock]$Accion, [bool]$Permitido = $true, [string]$Motivo = "", $Panel = $null, [string]$Clave = "", [string]$TextoBoton2 = "", [scriptblock]$Accion2 = $null)
     $item = [pscustomobject]@{ Nombre = $Titulo; Descripcion = $Descripcion; Riesgo = $Riesgo; Aviso = $Aviso }
     $t = New-Tarjeta -Item $item -Marcado $false
     # La tarjeta usa una casilla; aquí se cambia por un botón
@@ -904,6 +1020,18 @@ function New-TarjetaAccion {
     $boton.Add_Click($Accion)
     [System.Windows.Controls.DockPanel]::SetDock($boton, "Right")
     $fila.Children.Insert(0, $boton)
+    if ($TextoBoton2 -and $Accion2) {
+        $boton2 = New-Object System.Windows.Controls.Button
+        $boton2.Content = $TextoBoton2
+        $boton2.Padding = "12,4"
+        $boton2.Margin = "8,0,0,0"
+        $boton2.Tag = $Permitido
+        $boton2.IsEnabled = $Permitido
+        $boton2.Add_Click($Accion2)
+        [System.Windows.Controls.DockPanel]::SetDock($boton2, "Right")
+        $fila.Children.Insert(1, $boton2)
+        $script:BotonesSeguridad += $boton2
+    }
     [void]$fila.Children.Add($txtTitulo)
     if (-not $Permitido -and $Motivo) {
         $nota = New-Object System.Windows.Controls.TextBlock
@@ -1497,17 +1625,26 @@ New-TarjetaAccion -Panel $pI -Titulo "Abrir carpeta de informes" -TextoBoton "Ab
     }
 
 # Botones de abajo: solo se muestran los que sirven en la pestaña abierta
+function Update-BotonesPestana {
+    $sel = [string]$script:UI.Pestanas.SelectedItem.Name
+    $enAjustes = if ($sel -eq "TabAjustes") { "Visible" } else { "Collapsed" }
+    foreach ($b in "BtnRecomendados", "BtnPresetEstandar", "BtnPresetMinimo", "BtnLimpiar", "BtnDeshacer", "BtnAplicar", "BtnExportar", "BtnImportar") { $script:UI[$b].Visibility = $enAjustes }
+    $script:UI.BtnPreferencias.Visibility = if ($sel -eq "TabPreferencias") { "Visible" } else { "Collapsed" }
+}
+# Comprobaciones que se lanzan al abrir algunas pestañas (si hay otro trabajo, se hacen al terminar)
+function Invoke-ComprobacionPestana {
+    $sel = [string]$script:UI.Pestanas.SelectedItem.Name
+    if ($sel -eq "TabApps" -and -not $script:AppsComprobadas) { Start-ComprobarApps }
+    if ($sel -eq "TabConfig" -and -not $script:FeaturesComprobadas) { Start-ComprobarFeatures }
+    if ($sel -eq "TabInicio" -or $sel -eq "TabRendimiento") { Update-IndicadorRam }
+}
 $script:UI.Pestanas.Add_SelectionChanged({
     param($origen, $evento)
     if ($evento.OriginalSource -ne $script:UI.Pestanas) { return }
-    $i = $script:UI.Pestanas.SelectedIndex
-    $enAjustes = if ($i -eq 0) { "Visible" } else { "Collapsed" }
-    foreach ($b in "BtnRecomendados", "BtnPresetEstandar", "BtnPresetMinimo", "BtnLimpiar", "BtnDeshacer", "BtnAplicar") { $script:UI[$b].Visibility = $enAjustes }
-    $script:UI.BtnPreferencias.Visibility = if ($i -eq 1) { "Visible" } else { "Collapsed" }
-    if ($i -eq 2 -and -not $script:AppsComprobadas) { Start-ComprobarApps }
-    if ($i -eq 3 -and -not $script:FeaturesComprobadas) { Start-ComprobarFeatures }
+    Update-BotonesPestana
+    Invoke-ComprobacionPestana
 })
-$script:UI.BtnPreferencias.Visibility = "Collapsed"
+Update-BotonesPestana
 
 # ---------------------------------------------------------------- Acceso directo
 New-TarjetaAccion -Panel $script:UI.PanelAyuda -Titulo "Crear acceso directo en el Escritorio" -TextoBoton "Crear" -Riesgo "Bajo" `
@@ -1843,8 +1980,660 @@ foreach ($pn in $paneles) {
 
 Update-VistaAjustes
 
+# ---------------------------------------------------------------- Utilidades de pestañas
+function Select-Pestana([string]$NombrePestana) {
+    $tab = $script:Ventana.FindName($NombrePestana)
+    if ($tab) { $script:UI.Pestanas.SelectedItem = $tab }
+}
+
+function Get-ColorUso([int]$Porcentaje) {
+    if ($Porcentaje -ge 85) { return "#DC2626" }
+    if ($Porcentaje -ge 70) { return "#D97706" }
+    return "#16A34A"
+}
+
+function New-Indicador([string]$Nombre, [string]$Glifo) {
+    $marco = New-Object System.Windows.Controls.Border
+    $marco.Background = Get-Pincel "#FFFFFF"
+    $marco.BorderBrush = Get-Pincel "#E2E6EC"
+    $marco.BorderThickness = 1
+    $marco.CornerRadius = 10
+    $marco.Padding = "14,12"
+    $marco.Margin = "0,0,10,10"
+    $marco.Width = 205
+    $pila = New-Object System.Windows.Controls.StackPanel
+    $cab = New-Object System.Windows.Controls.StackPanel
+    $cab.Orientation = "Horizontal"
+    $ico = New-Object System.Windows.Controls.TextBlock
+    $ico.Text = $Glifo
+    $ico.FontFamily = "Segoe MDL2 Assets"
+    $ico.Foreground = Get-Pincel "#2563EB"
+    $ico.Margin = "0,1,8,0"
+    $ico.VerticalAlignment = "Center"
+    [void]$cab.Children.Add($ico)
+    $txtNombre = New-Object System.Windows.Controls.TextBlock
+    $txtNombre.Text = $Nombre
+    $txtNombre.Foreground = Get-Pincel "#6B7280"
+    $txtNombre.FontSize = 12
+    [void]$cab.Children.Add($txtNombre)
+    [void]$pila.Children.Add($cab)
+    $valor = New-Object System.Windows.Controls.TextBlock
+    $valor.Text = "..."
+    $valor.FontSize = 22
+    $valor.FontWeight = "SemiBold"
+    $valor.Foreground = Get-Pincel "#111827"
+    $valor.Margin = "0,4,0,4"
+    [void]$pila.Children.Add($valor)
+    $barraInd = New-Object System.Windows.Controls.ProgressBar
+    $barraInd.Height = 6
+    $barraInd.Minimum = 0
+    $barraInd.Maximum = 100
+    $barraInd.BorderThickness = 0
+    $barraInd.Background = Get-Pincel "#E5E7EB"
+    [void]$pila.Children.Add($barraInd)
+    $detalle = New-Object System.Windows.Controls.TextBlock
+    $detalle.Foreground = Get-Pincel "#6B7280"
+    $detalle.FontSize = 12
+    $detalle.TextWrapping = "Wrap"
+    $detalle.Margin = "0,6,0,0"
+    [void]$pila.Children.Add($detalle)
+    $marco.Child = $pila
+    return @{ Borde = $marco; Valor = $valor; Barra = $barraInd; Detalle = $detalle }
+}
+
+function Set-Indicador($Ind, [string]$Valor, [int]$Porcentaje, [string]$Detalle, [string]$Color = "") {
+    $Ind.Valor.Text = $Valor
+    $Ind.Detalle.Text = $Detalle
+    if ($Porcentaje -ge 0) {
+        $Ind.Barra.Visibility = "Visible"
+        $Ind.Barra.Value = $Porcentaje
+        $c = if ($Color) { $Color } else { Get-ColorUso $Porcentaje }
+        $Ind.Barra.Foreground = Get-Pincel $c
+    } else {
+        $Ind.Barra.Visibility = "Collapsed"
+    }
+}
+
+# Datos del equipo en el encabezado
+try {
+    $osEnc = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+    $ramEnc = [math]::Round($osEnc.TotalVisibleMemorySize / 1MB)
+    $script:UI.TxtEquipo.Text = "$env:COMPUTERNAME`n$($osEnc.Caption -replace '^Microsoft ', '')`n$ramEnc GB de RAM"
+} catch { }
+
+# ---------------------------------------------------------------- RAM y disco: ajustes propios
+# Mismo formato que los ajustes de WinUtil, así se guardan con respaldo y se deshacen exacto
+function New-EntradaRegistro([string]$Ruta, [string]$Nombre, [string]$Valor) {
+    return [pscustomobject]@{ Path = $Ruta; Name = $Nombre; Type = "DWord"; Value = $Valor; OriginalValue = "<RemoveEntry>" }
+}
+$script:ItemFondo = [pscustomobject]@{
+    Key = "OPT_FONDO"; Nombre = "Evitar apps en segundo plano"; Grupo = "Rendimiento"; Riesgo = "Bajo"
+    Descripcion = ""; Aviso = ""; InvokeScript = @(); UndoScript = @(); service = @()
+    registry = @(
+        (New-EntradaRegistro "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" "LetAppsRunInBackground" "2"),
+        (New-EntradaRegistro "HKLM:\SOFTWARE\Policies\Microsoft\Edge" "StartupBoostEnabled" "0"),
+        (New-EntradaRegistro "HKLM:\SOFTWARE\Policies\Microsoft\Edge" "BackgroundModeEnabled" "0"),
+        (New-EntradaRegistro "HKLM:\SOFTWARE\Policies\Google\Chrome" "BackgroundModeEnabled" "0"),
+        (New-EntradaRegistro "HKLM:\SOFTWARE\Policies\Microsoft\Dsh" "AllowNewsAndInterests" "0")
+    )
+}
+$script:ItemServiciosRam = [pscustomobject]@{
+    Key = "OPT_SERVICIOS_RAM"; Nombre = "Servicios que no hacen falta siempre"; Grupo = "Rendimiento"; Riesgo = "Bajo"
+    Descripcion = ""; Aviso = ""; InvokeScript = @(); UndoScript = @(); registry = @()
+    service = @(foreach ($n in "DiagTrack", "dmwappushservice", "MapsBroker", "RetailDemo", "Fax", "WerSvc", "PcaSvc") {
+        [pscustomobject]@{ Name = $n; StartupType = "Manual"; OriginalType = "Automatic" }
+    })
+}
+$script:ItemTemporales = @($script:Ajustes | Where-Object { $_.Key -eq "WPFTweaksDeleteTempFiles" })[0]
+
+$script:codigoLiberarRam = @'
+if (-not ("OptESRam.Nativo" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace OptESRam {
+public static class Nativo {
+    [DllImport("psapi.dll")] public static extern bool EmptyWorkingSet(IntPtr h);
+    [DllImport("ntdll.dll")] static extern int NtSetSystemInformation(int clase, ref int info, int largo);
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr p, uint acceso, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool LookupPrivilegeValue(string sistema, string nombre, out long luid);
+    [StructLayout(LayoutKind.Sequential, Pack = 1)] struct TP { public int Cuenta; public long Luid; public int Atributos; }
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool AdjustTokenPrivileges(IntPtr t, bool desactivarTodo, ref TP nuevo, int largo, IntPtr previo, IntPtr devuelto);
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    public static bool Privilegio(string nombre) {
+        IntPtr t;
+        if (!OpenProcessToken(GetCurrentProcess(), 0x28, out t)) return false;
+        try {
+            TP tp; tp.Cuenta = 1; tp.Atributos = 2;
+            if (!LookupPrivilegeValue(null, nombre, out tp.Luid)) return false;
+            bool ok = AdjustTokenPrivileges(t, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
+            return ok && Marshal.GetLastWin32Error() == 0;
+        } finally { CloseHandle(t); }
+    }
+    // SystemMemoryListInformation = 80: 2 vaciar working sets, 3 escribir lista modificada, 4 purgar en espera, 5 purgar en espera de baja prioridad
+    public static int Lista(int comando) { return NtSetSystemInformation(80, ref comando, 4); }
+}
+}
+"@
+}
+$libreAntes = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB, 2)
+[void][OptESRam.Nativo]::Privilegio("SeProfileSingleProcessPrivilege")
+[void][OptESRam.Nativo]::Privilegio("SeIncreaseQuotaPrivilege")
+if ([OptESRam.Nativo]::Lista(2) -ne 0) {
+    $n = 0
+    foreach ($p in Get-Process) { try { if ([OptESRam.Nativo]::EmptyWorkingSet($p.Handle)) { $n++ } } catch { } }
+    Write-Output "Memoria de trabajo recortada en $n procesos."
+} else {
+    Write-Output "Memoria de trabajo de los procesos recortada."
+}
+[void][OptESRam.Nativo]::Lista(3)
+[void][OptESRam.Nativo]::Lista(5)
+if ([OptESRam.Nativo]::Lista(4) -eq 0) { Write-Output "Caché en espera vaciada." }
+else { Write-Warning "No se pudo vaciar la caché en espera." }
+Start-Sleep -Seconds 1
+$libreDespues = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB, 2)
+Write-Output ("RAM libre antes: {0} GB. Después: {1} GB (+{2} GB)." -f $libreAntes, $libreDespues, [math]::Max(0, [math]::Round($libreDespues - $libreAntes, 2)))
+Write-Output "Es normal que los programas vuelvan a tomar parte de esa memoria cuando los uses."
+'@
+
+$script:codigoPaginacion = @'
+$cs = Get-CimInstance Win32_ComputerSystem
+if ($cs.AutomaticManagedPagefile) {
+    Write-Output "La memoria virtual ya está en automático (lo recomendado). No hace falta cambiar nada."
+    return
+}
+Set-CimInstance -InputObject $cs -Property @{ AutomaticManagedPagefile = $true } -ErrorAction Stop
+Write-Output "Memoria virtual en automático (administrada por Windows). Se aplica al reiniciar."
+'@
+
+# ---------------------------------------------------------------- Análisis del equipo
+$script:codigoAnalisis = @'
+function Add-Hallazgo([string]$Nivel, [string]$Titulo, [string]$Detalle, [string]$Accion = "") {
+    [void]$global:Estado.Analisis.Add(@{ Nivel = $Nivel; Titulo = $Titulo; Detalle = $Detalle; Accion = $Accion })
+}
+$met = $global:Estado.Metricas
+Write-Output "Analizando el equipo..."
+
+# Memoria RAM
+$os = Get-CimInstance Win32_OperatingSystem
+$totalGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
+$libreGB = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
+$pctRam = [int][math]::Round(100 * (1 - $os.FreePhysicalMemory / $os.TotalVisibleMemorySize))
+$top = Get-Process | Group-Object ProcessName | ForEach-Object {
+    [pscustomobject]@{ Proc = $_.Name; GB = [math]::Round((($_.Group | Measure-Object WorkingSet64 -Sum).Sum) / 1GB, 1) }
+} | Sort-Object GB -Descending | Select-Object -First 3
+$topTxt = ($top | ForEach-Object { "$($_.Proc) ($($_.GB) GB)" }) -join ", "
+if ($pctRam -ge 85) {
+    Add-Hallazgo "Problema" "La memoria RAM está casi llena ($pctRam %)" "Quedan $libreGB GB libres y los programas irán lentos. Lo que más usa: $topTxt." "LiberarRAM"
+} elseif ($pctRam -ge 70) {
+    Add-Hallazgo "Atencion" "La memoria RAM va bastante ocupada ($pctRam %)" "Lo que más usa: $topTxt. Cierra lo que no uses o libera RAM." "LiberarRAM"
+} else {
+    Add-Hallazgo "Bien" "Memoria RAM con espacio ($pctRam % en uso)" "Lo que más usa: $topTxt."
+}
+if ($totalGB -le 8.5) {
+    Add-Hallazgo "Atencion" "El equipo tiene $([math]::Round($totalGB)) GB de RAM" "Con Windows 11, navegador y Office se recomiendan 16 GB. Si la placa lo permite, ampliar la RAM es la mejora que más se nota."
+}
+
+# Tiempo encendido y reinicio pendiente
+$horas = ((Get-Date) - $os.LastBootUpTime).TotalHours
+$met.Encendido = if ($horas -ge 48) { "{0} días" -f [math]::Floor($horas / 24) } else { "{0} h" -f [math]::Floor($horas) }
+$pendiente = (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") -or
+             (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending")
+if ($pendiente) {
+    Add-Hallazgo "Atencion" "Windows espera un reinicio" "Hay actualizaciones o cambios a medio instalar. Reinicia cuando puedas." "Reiniciar"
+} elseif ($horas -ge 24 * 7) {
+    Add-Hallazgo "Atencion" "El equipo lleva $([math]::Floor($horas / 24)) días sin reiniciar" "Reiniciar libera memoria y termina instalaciones. Ojo: 'Apagar' no cuenta si el inicio rápido está activo; usa 'Reiniciar'." "Reiniciar"
+}
+
+# Disco C:
+$d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+if ($d -and $d.Size) {
+    $libreDisco = [math]::Round($d.FreeSpace / 1GB, 1)
+    $pctLibre = [int](100 * $d.FreeSpace / $d.Size)
+    $met.DiscoPct = 100 - $pctLibre
+    $met.DiscoTxt = "$libreDisco GB libres de $([math]::Round($d.Size / 1GB)) GB"
+    if ($pctLibre -lt 10) {
+        Add-Hallazgo "Problema" "El disco C: está casi lleno" "Solo quedan $libreDisco GB. Windows necesita espacio para actualizarse y para la memoria virtual. Borra temporales y desinstala lo que no uses." "Temporales"
+    } elseif ($pctLibre -lt 20) {
+        Add-Hallazgo "Atencion" "Queda poco espacio en C: ($libreDisco GB)" "Conviene dejar al menos un 20 % libre. Empieza por los archivos temporales." "Temporales"
+    } else {
+        Add-Hallazgo "Bien" "Espacio en disco suficiente" "$libreDisco GB libres en C:."
+    }
+}
+
+# Archivos temporales
+$bytesTemp = 0
+foreach ($carpeta in @($env:TEMP, "$env:SystemRoot\Temp")) {
+    try { $bytesTemp += [double](Get-ChildItem -LiteralPath $carpeta -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum } catch { }
+}
+$gbTemp = [math]::Round($bytesTemp / 1GB, 1)
+if ($gbTemp -ge 1) {
+    Add-Hallazgo "Atencion" "Hay $gbTemp GB de archivos temporales" "Son restos de instalaciones y programas. Se pueden borrar sin perder nada tuyo." "Temporales"
+}
+
+# Salud y tipo de disco
+try {
+    $fisicos = @(Get-PhysicalDisk -ErrorAction Stop)
+    foreach ($f in $fisicos | Where-Object { $_.HealthStatus -and [string]$_.HealthStatus -ne "Healthy" }) {
+        Add-Hallazgo "Problema" "El disco '$($f.FriendlyName)' reporta problemas de salud" "Estado: $($f.HealthStatus). Haz una copia de seguridad de tus archivos cuanto antes." "Informe"
+    }
+    $numDisco = (Get-Partition -DriveLetter C -ErrorAction Stop).DiskNumber
+    $sistema = $fisicos | Where-Object { [string]$_.DeviceId -eq [string]$numDisco } | Select-Object -First 1
+    if ($sistema -and [string]$sistema.MediaType -eq "HDD") {
+        Add-Hallazgo "Atencion" "Windows está en un disco mecánico (HDD)" "Cambiarlo por un SSD es la mejora de velocidad más grande que se le puede hacer a este equipo."
+    }
+} catch { }
+
+# Programas de arranque
+$arranque = @(Get-CimInstance Win32_StartupCommand -ErrorAction SilentlyContinue)
+$met.Arranque = $arranque.Count
+if ($arranque.Count -ge 12) {
+    Add-Hallazgo "Atencion" "Hay $($arranque.Count) programas configurados para arrancar con Windows" "Cada uno consume RAM y retrasa el encendido. Desactiva los que no necesites nada más encender." "Arranque"
+}
+
+# Memoria virtual
+if (@(Get-CimInstance Win32_PageFileUsage -ErrorAction SilentlyContinue).Count -eq 0) {
+    Add-Hallazgo "Problema" "La memoria virtual (archivo de paginación) está desactivada" "Sin ella, los programas se cierran de golpe cuando se llena la RAM. Lo recomendado es dejarla en automático." "Paginacion"
+}
+
+# Controladores con problemas (22 = desactivado a propósito)
+$malos = @(Get-CimInstance Win32_PnPEntity -Filter "ConfigManagerErrorCode <> 0 AND ConfigManagerErrorCode <> 22" -ErrorAction SilentlyContinue)
+if ($malos.Count) {
+    $nombres = ($malos | Select-Object -First 3 | ForEach-Object { if ($_.Name) { $_.Name } else { $_.DeviceID } }) -join "; "
+    Add-Hallazgo "Atencion" "$($malos.Count) dispositivo(s) con problemas de controlador" "Por ejemplo: $nombres. Instala el controlador del fabricante o revisa el Administrador de dispositivos." "Dispositivos"
+}
+
+# Actualizaciones de Windows
+try {
+    $ultima = Get-HotFix -ErrorAction Stop | Where-Object { $_.InstalledOn } | Sort-Object InstalledOn -Descending | Select-Object -First 1
+    if ($ultima) {
+        $dias = [int]((Get-Date) - $ultima.InstalledOn).TotalDays
+        if ($dias -gt 45) {
+            Add-Hallazgo "Atencion" "Windows lleva $dias días sin instalar actualizaciones" "Las actualizaciones corrigen fallos de seguridad. Revisa Windows Update." "Updates"
+        }
+    }
+} catch { }
+
+# Batería (portátiles)
+try {
+    $llena = (Get-CimInstance -Namespace root\wmi -ClassName BatteryFullChargedCapacity -ErrorAction Stop | Select-Object -First 1).FullChargedCapacity
+    $diseno = (Get-CimInstance -Namespace root\wmi -ClassName BatteryStaticData -ErrorAction Stop | Select-Object -First 1).DesignedCapacity
+    if ($llena -and $diseno) {
+        $salud = [int](100 * $llena / $diseno)
+        if ($salud -lt 60) {
+            Add-Hallazgo "Problema" "La batería solo conserva el $salud % de su capacidad" "Durará mucho menos que nueva. Conviene cambiarla." "Bateria"
+        } elseif ($salud -lt 80) {
+            Add-Hallazgo "Atencion" "La batería conserva el $salud % de su capacidad" "Es desgaste normal con el uso; si dura poco, plantéate cambiarla." "Bateria"
+        }
+    }
+} catch { }
+
+Write-Output "Análisis terminado."
+'@
+
+# ---------------------------------------------------------------- Pestaña Inicio
+$pIni = $script:UI.PanelInicio
+[void]$pIni.Children.Add((New-Titulo "Estado de tu equipo" "Un vistazo rápido y lo que conviene arreglar. El análisis no cambia nada; cada recomendación tiene su botón."))
+$filaInd = New-Object System.Windows.Controls.WrapPanel
+$script:IndSalud = New-Indicador "Salud general" ([string][char]0xE95E)
+$script:IndRam = New-Indicador "Memoria RAM" ([string][char]0xE9D9)
+$script:IndDisco = New-Indicador "Disco C:" ([string][char]0xEDA2)
+$script:IndEncendido = New-Indicador "Encendido desde hace" ([string][char]0xE823)
+foreach ($ind in $script:IndSalud, $script:IndRam, $script:IndDisco, $script:IndEncendido) { [void]$filaInd.Children.Add($ind.Borde) }
+[void]$pIni.Children.Add($filaInd)
+
+$filaBotonesIni = New-Object System.Windows.Controls.WrapPanel
+$filaBotonesIni.Margin = "0,2,0,10"
+$script:BtnAnalizar = New-Object System.Windows.Controls.Button
+$script:BtnAnalizar.Content = "Analizar de nuevo"
+$script:BtnAnalizar.Style = $script:Ventana.FindResource("Primario")
+$script:BtnAnalizar.Padding = "16,6"
+$script:BtnAnalizar.Margin = "0,0,8,0"
+$script:BtnAnalizar.Tag = $true
+$script:BtnAnalizar.Add_Click({ Start-Analisis })
+$script:BotonesSeguridad += $script:BtnAnalizar
+[void]$filaBotonesIni.Children.Add($script:BtnAnalizar)
+$btnIrRam = New-Object System.Windows.Controls.Button
+$btnIrRam.Content = "Liberar RAM ahora"
+$btnIrRam.Padding = "14,6"
+$btnIrRam.Tag = $true
+$btnIrRam.Add_Click({ Invoke-AccionAnalisis "LiberarRAM" })
+$script:BotonesSeguridad += $btnIrRam
+[void]$filaBotonesIni.Children.Add($btnIrRam)
+[void]$pIni.Children.Add($filaBotonesIni)
+
+$script:TxtResumenAnalisis = New-Object System.Windows.Controls.TextBlock
+$script:TxtResumenAnalisis.FontSize = 15
+$script:TxtResumenAnalisis.FontWeight = "SemiBold"
+$script:TxtResumenAnalisis.Foreground = Get-Pincel "#111827"
+$script:TxtResumenAnalisis.Margin = "0,4,0,8"
+$script:TxtResumenAnalisis.Text = "Analizando el equipo..."
+[void]$pIni.Children.Add($script:TxtResumenAnalisis)
+$script:PanelHallazgos = New-Object System.Windows.Controls.StackPanel
+[void]$pIni.Children.Add($script:PanelHallazgos)
+
+# Qué hace el botón de cada recomendación
+$script:AccionesAnalisis = @{
+    LiberarRAM   = @{ Texto = "Liberar RAM";   Hacer = { Start-Pasos -Pasos @(New-PasoScript -Nombre "Liberar RAM" -Codigo $script:codigoLiberarRam) } }
+    Temporales   = @{ Texto = "Limpiar";       Hacer = { if ($script:ItemTemporales) { Start-Pasos -Pasos @([pscustomobject]@{ Item = $script:ItemTemporales; Deshacer = $false }) -Titulo "Borrar archivos temporales" } } }
+    Arranque     = @{ Texto = "Revisar";       Hacer = { Start-Process "ms-settings:startupapps" } }
+    Paginacion   = @{ Texto = "Arreglar";      Hacer = { Start-Pasos -Pasos @(New-PasoScript -Nombre "Memoria virtual en automático" -Codigo $script:codigoPaginacion) -OfrecerReinicio } }
+    Fondo        = @{ Texto = "Aplicar";       Hacer = { Start-Pasos -Pasos @([pscustomobject]@{ Item = $script:ItemFondo; Deshacer = $false }) -Titulo "Evitar apps en segundo plano" } }
+    Recomendados = @{ Texto = "Ver y marcar";  Hacer = { Select-Pestana "TabAjustes"; $script:UI.BtnRecomendados.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Button]::ClickEvent))) } }
+    Seguridad    = @{ Texto = "Ver";           Hacer = { Select-Pestana "TabSeguridad" } }
+    Informe      = @{ Texto = "Ver";           Hacer = { Select-Pestana "TabInforme" } }
+    Bateria      = @{ Texto = "Ver informe";   Hacer = { Start-Pasos -Pasos @(New-PasoScript -Nombre "Informe de batería" -Codigo $script:codigoBateria) } }
+    Updates      = @{ Texto = "Abrir";         Hacer = { Start-Process "ms-settings:windowsupdate" } }
+    Dispositivos = @{ Texto = "Abrir";         Hacer = { Start-Process "devmgmt.msc" } }
+    Reiniciar    = @{ Texto = "Reiniciar";     Hacer = {
+        if ([System.Windows.MessageBox]::Show("¿Reiniciar el equipo ahora? Guarda tu trabajo antes.", "Optimizador", "YesNo", "Question") -eq "Yes") { Restart-Computer -Force }
+    } }
+}
+
+function Invoke-AccionAnalisis([string]$Clave) {
+    $acc = $script:AccionesAnalisis[$Clave]
+    if (-not $acc) { return }
+    & $acc.Hacer
+    # Si lanzó un trabajo, al terminar se vuelve a analizar para ver el cambio
+    if ($script:Trabajo) { $script:AlTerminar = { Start-Analisis } }
+}
+
+function Start-Analisis {
+    if ($script:Trabajo) { return }
+    $global:Estado.Analisis = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+    $global:Estado.Metricas = [hashtable]::Synchronized(@{})
+    $script:TxtResumenAnalisis.Text = "Analizando el equipo..."
+    Start-Pasos -Pasos @(New-PasoScript -Nombre "Analizar el equipo" -Codigo $script:codigoAnalisis) -Silencioso
+    if ($script:Trabajo) { $script:AlTerminar = { Show-Analisis } }
+}
+
+function New-TarjetaHallazgo($Hallazgo) {
+    $colores = @{
+        Problema = @{ Borde = "#DC2626"; Fondo = "#FEF2F2"; Icono = [string][char]0x2716 }
+        Atencion = @{ Borde = "#D97706"; Fondo = "#FFFBEB"; Icono = [string][char]0x26A0 }
+        Bien     = @{ Borde = "#16A34A"; Fondo = "#FFFFFF"; Icono = [string][char]0x2714 }
+    }
+    $col = $colores[$Hallazgo.Nivel]
+    $marco = New-Object System.Windows.Controls.Border
+    $marco.Background = Get-Pincel $col.Fondo
+    $marco.BorderBrush = Get-Pincel $col.Borde
+    $marco.BorderThickness = "4,0,0,0"
+    $marco.CornerRadius = 8
+    $marco.Padding = "14,10"
+    $marco.Margin = "0,0,0,8"
+    $fila = New-Object System.Windows.Controls.DockPanel
+    $acc = if ($Hallazgo.Accion) { $script:AccionesAnalisis[$Hallazgo.Accion] } else { $null }
+    if ($acc -and $Hallazgo.Nivel -ne "Bien") {
+        $btn = New-Object System.Windows.Controls.Button
+        $btn.Content = $acc.Texto
+        $btn.Padding = "14,5"
+        $btn.Margin = "12,0,0,0"
+        $btn.VerticalAlignment = "Center"
+        $btn.Uid = $Hallazgo.Accion
+        $btn.Tag = $true
+        $btn.IsEnabled = -not $script:Trabajo
+        $btn.Add_Click({ param($origen, $e) Invoke-AccionAnalisis $origen.Uid })
+        $script:BotonesSeguridad += $btn
+        [System.Windows.Controls.DockPanel]::SetDock($btn, "Right")
+        [void]$fila.Children.Add($btn)
+    }
+    $ico = New-Object System.Windows.Controls.TextBlock
+    $ico.Text = $col.Icono
+    $ico.Foreground = Get-Pincel $col.Borde
+    $ico.FontSize = 16
+    $ico.Margin = "0,0,10,0"
+    $ico.VerticalAlignment = "Top"
+    [System.Windows.Controls.DockPanel]::SetDock($ico, "Left")
+    [void]$fila.Children.Add($ico)
+    $pila = New-Object System.Windows.Controls.StackPanel
+    $tit = New-Object System.Windows.Controls.TextBlock
+    $tit.Text = $Hallazgo.Titulo
+    $tit.FontWeight = "SemiBold"
+    $tit.TextWrapping = "Wrap"
+    [void]$pila.Children.Add($tit)
+    if ($Hallazgo.Detalle) {
+        $det = New-Object System.Windows.Controls.TextBlock
+        $det.Text = $Hallazgo.Detalle
+        $det.TextWrapping = "Wrap"
+        $det.Foreground = Get-Pincel "#4B5563"
+        $det.Margin = "0,2,0,0"
+        [void]$pila.Children.Add($det)
+    }
+    [void]$fila.Children.Add($pila)
+    $marco.Child = $fila
+    return $marco
+}
+
+function Show-Analisis {
+    $lista = New-Object System.Collections.ArrayList
+    foreach ($h in @($global:Estado.Analisis)) { [void]$lista.Add($h) }
+
+    # Comprobaciones rápidas que se hacen aquí mismo
+    $avActivos = @($script:Antivirus | Where-Object { $_.Activo })
+    if ($script:Antivirus.Count -and $avActivos.Count -eq 0) {
+        [void]$lista.Add(@{ Nivel = "Problema"; Titulo = "No hay ningún antivirus activo"; Detalle = "Activa Microsoft Defender o tu antivirus."; Accion = "Seguridad" })
+    } elseif (@($avActivos | Where-Object { -not $_.AlDia }).Count) {
+        [void]$lista.Add(@{ Nivel = "Atencion"; Titulo = "Las firmas del antivirus no están al día"; Detalle = "Actualízalo para que detecte las amenazas nuevas."; Accion = "Seguridad" })
+    } elseif ($avActivos.Count) {
+        [void]$lista.Add(@{ Nivel = "Bien"; Titulo = "Antivirus activo y al día"; Detalle = (($avActivos | ForEach-Object { $_.Nombre }) -join ", "); Accion = "" })
+    }
+    $sinAplicar = @($script:Ajustes | Where-Object {
+        $_.Grupo -eq "Esenciales" -and $_.Riesgo -eq "Bajo" -and $_.Key -ne "WPFTweaksRestorePoint" -and
+        (@($_.registry | Where-Object { $_ }).Count + @($_.service | Where-Object { $_ }).Count) -gt 0 -and
+        -not $script:HechosSesion[$_.Key] -and -not (Test-AjusteAplicado $_)
+    })
+    if ($sinAplicar.Count) {
+        [void]$lista.Add(@{ Nivel = "Atencion"; Titulo = "Hay $($sinAplicar.Count) ajuste(s) recomendados sin aplicar"; Detalle = "Son de riesgo bajo: telemetría, servicios y otros que restan rendimiento. Revísalos antes de aplicar."; Accion = "Recomendados" })
+    }
+    if (-not (Test-AjusteAplicado $script:ItemFondo)) {
+        [void]$lista.Add(@{ Nivel = "Atencion"; Titulo = "Algunas apps pueden quedarse abiertas en segundo plano"; Detalle = "Edge, Chrome, Widgets y apps de la Tienda siguen gastando RAM aunque cierres la ventana."; Accion = "Fondo" })
+    }
+
+    $problemas = @($lista | Where-Object { $_.Nivel -eq "Problema" }).Count
+    $atencion = @($lista | Where-Object { $_.Nivel -eq "Atencion" }).Count
+    $puntos = [math]::Max(5, 100 - 20 * $problemas - 7 * $atencion)
+    $colorPuntos = if ($puntos -ge 80) { "#16A34A" } elseif ($puntos -ge 55) { "#D97706" } else { "#DC2626" }
+    $textoPuntos = if ($puntos -ge 80) { "Bien" } elseif ($puntos -ge 55) { "Mejorable" } else { "Necesita atención" }
+    Set-Indicador $script:IndSalud "$puntos / 100" $puntos $textoPuntos $colorPuntos
+
+    $met = $global:Estado.Metricas
+    if ($met.DiscoTxt) { Set-Indicador $script:IndDisco "$($met.DiscoPct) % usado" ([int]$met.DiscoPct) $met.DiscoTxt }
+    if ($met.Encendido) { Set-Indicador $script:IndEncendido $met.Encendido -1 "$($met.Arranque) programa(s) al iniciar" }
+    Update-IndicadorRam
+
+    $script:TxtResumenAnalisis.Text = if ($problemas -eq 0 -and $atencion -eq 0) { "Todo en orden: no hay nada importante que arreglar." }
+        else { "Recomendaciones: $problemas problema(s) y $atencion aviso(s)" }
+    $script:PanelHallazgos.Children.Clear()
+    foreach ($nivel in "Problema", "Atencion", "Bien") {
+        foreach ($h in @($lista | Where-Object { $_.Nivel -eq $nivel })) {
+            [void]$script:PanelHallazgos.Children.Add((New-TarjetaHallazgo $h))
+        }
+    }
+}
+
+# ---------------------------------------------------------------- Pestaña RAM y disco
+$pR = $script:UI.PanelRendimiento
+[void]$pR.Children.Add((New-Titulo "Memoria RAM" "Windows usa la RAM libre como caché, así que verla ocupada no siempre es malo. Lo que de verdad ayuda es que haya menos programas abiertos y arrancando solos."))
+
+$marcoRam = New-Object System.Windows.Controls.Border
+$marcoRam.Background = Get-Pincel "#FFFFFF"
+$marcoRam.BorderBrush = Get-Pincel "#E2E6EC"
+$marcoRam.BorderThickness = 1
+$marcoRam.CornerRadius = 10
+$marcoRam.Padding = "16,12"
+$marcoRam.Margin = "0,0,0,10"
+$pilaRam = New-Object System.Windows.Controls.StackPanel
+$script:TxtRamGrande = New-Object System.Windows.Controls.TextBlock
+$script:TxtRamGrande.FontSize = 20
+$script:TxtRamGrande.FontWeight = "SemiBold"
+[void]$pilaRam.Children.Add($script:TxtRamGrande)
+$script:BarraRam = New-Object System.Windows.Controls.ProgressBar
+$script:BarraRam.Height = 10
+$script:BarraRam.Margin = "0,8,0,6"
+$script:BarraRam.BorderThickness = 0
+$script:BarraRam.Background = Get-Pincel "#E5E7EB"
+[void]$pilaRam.Children.Add($script:BarraRam)
+$script:TxtRamDetalle = New-Object System.Windows.Controls.TextBlock
+$script:TxtRamDetalle.Foreground = Get-Pincel "#6B7280"
+[void]$pilaRam.Children.Add($script:TxtRamDetalle)
+$marcoRam.Child = $pilaRam
+[void]$pR.Children.Add($marcoRam)
+
+function Update-IndicadorRam {
+    try {
+        $osRam = Get-CimInstance Win32_OperatingSystem -Property TotalVisibleMemorySize, FreePhysicalMemory -ErrorAction Stop
+    } catch { return }
+    $totalRam = [math]::Round($osRam.TotalVisibleMemorySize / 1MB, 1)
+    $libreRam = [math]::Round($osRam.FreePhysicalMemory / 1MB, 1)
+    $usoRam = [math]::Round($totalRam - $libreRam, 1)
+    $pctUso = [int][math]::Round(100 * $usoRam / [math]::Max($totalRam, 0.1))
+    Set-Indicador $script:IndRam "$pctUso %" $pctUso "$usoRam de $totalRam GB en uso"
+    $script:TxtRamGrande.Text = "$usoRam GB en uso de $totalRam GB ($pctUso %)"
+    $script:BarraRam.Value = $pctUso
+    $script:BarraRam.Foreground = Get-Pincel (Get-ColorUso $pctUso)
+    $script:TxtRamDetalle.Text = "Disponible: $libreRam GB. Se actualiza solo cada pocos segundos."
+}
+
+New-TarjetaAccion -Panel $pR -Titulo "Liberar RAM ahora" -TextoBoton "Liberar" -Riesgo "Bajo" `
+    -Descripcion "Vacía la caché en espera y recorta la memoria que los programas tienen reservada sin usar. No cierra nada." `
+    -Aviso "El efecto es temporal: los programas vuelven a tomar memoria cuando los usas." -Accion { Invoke-AccionAnalisis "LiberarRAM" }
+
+New-TarjetaAccion -Panel $pR -Titulo "Programas abiertos que más RAM usan" -TextoBoton "Ver lista" -Riesgo "Bajo" `
+    -Descripcion "Muestra los programas de tu sesión que más memoria ocupan, con un botón para cerrar cada uno." `
+    -Aviso "Al cerrar un programa se pierde lo que no esté guardado en él." -Accion { Update-ListaProcesos }
+$script:PanelProcesos = New-Object System.Windows.Controls.StackPanel
+$script:PanelProcesos.Margin = "0,0,0,8"
+[void]$pR.Children.Add($script:PanelProcesos)
+
+New-TarjetaAccion -Panel $pR -Clave "OPT_FONDO" -Titulo "Evitar apps en segundo plano" -TextoBoton "Aplicar" -TextoBoton2 "Deshacer" -Riesgo "Bajo" `
+    -Descripcion "Edge y Chrome dejan de quedarse abiertos al cerrar la ventana y Edge no se precarga al encender. También se apagan los Widgets y las apps de la Tienda en segundo plano." `
+    -Aviso "Edge y Chrome dirán 'Administrado por tu organización': es por estas políticas. Las apps de la Tienda no avisarán hasta que las abras." `
+    -Accion { Invoke-AccionAnalisis "Fondo" } `
+    -Accion2 { Start-Pasos -Pasos @([pscustomobject]@{ Item = $script:ItemFondo; Deshacer = $true }) -Titulo "Deshacer: apps en segundo plano" }
+
+New-TarjetaAccion -Panel $pR -Clave "OPT_SERVICIOS_RAM" -Titulo "Servicios que no hacen falta siempre" -TextoBoton "Poner en manual" -TextoBoton2 "Deshacer" -Riesgo "Bajo" `
+    -Descripcion "Telemetría, mapas sin conexión, fax, modo tienda, informe de errores y asistente de compatibilidad pasan a manual: solo arrancan si algo los necesita." `
+    -Aviso "Ninguno para el uso normal. Se guarda cómo estaban para poder deshacerlo exacto." `
+    -Accion { Start-Pasos -Pasos @([pscustomobject]@{ Item = $script:ItemServiciosRam; Deshacer = $false }) -Titulo "Servicios en manual" } `
+    -Accion2 { Start-Pasos -Pasos @([pscustomobject]@{ Item = $script:ItemServiciosRam; Deshacer = $true }) -Titulo "Deshacer: servicios en manual" }
+
+New-TarjetaAccion -Panel $pR -Titulo "Memoria virtual en automático" -TextoBoton "Arreglar" -Riesgo "Bajo" `
+    -Descripcion "Deja el archivo de paginación administrado por Windows. Quitarlo no da más RAM: hace que los programas se cierren solos cuando se llena." `
+    -Aviso "" -Accion { Invoke-AccionAnalisis "Paginacion" }
+
+[void]$pR.Children.Add((New-Titulo "Espacio en disco" "Para cuando el disco C: se queda sin espacio."))
+New-TarjetaAccion -Panel $pR -Titulo "Borrar archivos temporales" -TextoBoton "Limpiar" -Riesgo "Bajo" `
+    -Descripcion "Vacía las carpetas TEMP de tu usuario y de Windows." `
+    -Aviso "Cierra tus programas antes: un instalador o documento abierto que use TEMP podría fallar." -Accion { Invoke-AccionAnalisis "Temporales" }
+New-TarjetaAccion -Panel $pR -Titulo "Liberador de espacio de Windows" -TextoBoton "Abrir" -Riesgo "Bajo" `
+    -Descripcion "La herramienta de Windows para borrar la papelera, miniaturas y restos de actualizaciones. Tú eliges qué borrar." `
+    -Aviso "" -Accion { Start-Process "cleanmgr.exe" -ArgumentList "/d C:" }
+New-TarjetaAccion -Panel $pR -Titulo "Ver qué ocupa espacio" -TextoBoton "Abrir" -Riesgo "Bajo" `
+    -Descripcion "Abre Configuración > Almacenamiento, con el espacio por categorías y el Sensor de almacenamiento." `
+    -Aviso "" -Accion { Start-Process "ms-settings:storagesense" }
+
+[void]$pR.Children.Add((New-Titulo "Arranque" "Menos programas al encender = arranque más rápido y más RAM libre."))
+New-TarjetaAccion -Panel $pR -Titulo "Programas que arrancan con Windows" -TextoBoton "Abrir" -TextoBoton2 "Ver lista" -Riesgo "Bajo" `
+    -Descripcion "Abre la lista de Windows para activar o desactivar cada programa. 'Ver lista' los escribe en el registro de abajo." `
+    -Aviso "No desactives el antivirus ni los controladores de audio, touchpad o gráficos." `
+    -Accion { Invoke-AccionAnalisis "Arranque" } `
+    -Accion2 { Start-Pasos -Pasos @(New-PasoScript -Nombre "Programas de arranque" -Codigo $script:codigoArranque) }
+
+$script:Protegidos = @(
+    "System", "Idle", "Registry", "smss", "csrss", "wininit", "winlogon", "services", "lsass", "svchost", "dwm",
+    "explorer", "fontdrvhost", "Memory Compression", "sihost", "ctfmon", "taskhostw", "RuntimeBroker", "SearchHost",
+    "StartMenuExperienceHost", "ShellExperienceHost", "TextInputHost", "audiodg", "conhost", "powershell", "pwsh",
+    "WindowsTerminal", "OpenConsole", "MsMpEng", "NisSrv", "SecurityHealthService", "SecurityHealthSystray",
+    "ekrn", "egui", "eguiProxy", "spoolsv", "WmiPrvSE", "dllhost", "LsaIso", "SgrmBroker", "MpDefenderCoreService",
+    "Claude", "claude", "LockApp", "SearchApp", "SearchIndexer", "smartscreen", "PhoneExperienceHost"
+)
+
+function Update-ListaProcesos {
+    $script:PanelProcesos.Children.Clear()
+    $sesion = (Get-Process -Id $PID).SessionId
+    $grupos = @(Get-Process | Where-Object { $_.SessionId -eq $sesion -and $script:Protegidos -notcontains $_.ProcessName } |
+        Group-Object ProcessName | ForEach-Object {
+            $ventanaAbierta = @($_.Group | Where-Object { $_.MainWindowTitle } | Select-Object -First 1)
+            [pscustomobject]@{
+                Proc = $_.Name
+                MB = [math]::Round((($_.Group | Measure-Object WorkingSet64 -Sum).Sum) / 1MB)
+                Ids = @($_.Group | ForEach-Object { $_.Id })
+                Abierta = if ($ventanaAbierta.Count) { $ventanaAbierta[0].MainWindowTitle } else { "" }
+            }
+        } | Where-Object { $_.MB -ge 50 } | Sort-Object MB -Descending | Select-Object -First 15)
+    if ($grupos.Count -eq 0) {
+        $vacio = New-Object System.Windows.Controls.TextBlock
+        $vacio.Text = "No hay programas grandes abiertos."
+        $vacio.Margin = "16,0,0,6"
+        [void]$script:PanelProcesos.Children.Add($vacio)
+        return
+    }
+    foreach ($g in $grupos) {
+        $marco = New-Object System.Windows.Controls.Border
+        $marco.Background = Get-Pincel "#FFFFFF"
+        $marco.BorderBrush = Get-Pincel "#E2E6EC"
+        $marco.BorderThickness = 1
+        $marco.CornerRadius = 6
+        $marco.Padding = "12,6"
+        $marco.Margin = "16,0,0,4"
+        $fila = New-Object System.Windows.Controls.DockPanel
+        $btn = New-Object System.Windows.Controls.Button
+        $btn.Content = "Cerrar"
+        $btn.Padding = "12,3"
+        $btn.Tag = $g
+        $btn.Add_Click({
+            param($origen, $e)
+            $p = $origen.Tag
+            $msg = "¿Cerrar $($p.Proc)?`r`n`r`nLo que no esté guardado en ese programa se pierde."
+            if ([System.Windows.MessageBox]::Show($msg, "Cerrar programa", "YesNo", "Warning") -ne "Yes") { return }
+            foreach ($id in $p.Ids) { try { [void](Get-Process -Id $id -ErrorAction Stop).CloseMainWindow() } catch { } }
+            Start-Sleep -Milliseconds 1200
+            foreach ($id in $p.Ids) { try { Stop-Process -Id $id -Force -ErrorAction Stop } catch { } }
+            Escribir-Log "Cerrado: $($p.Proc) ($($p.MB) MB)"
+            Update-ListaProcesos
+            Update-IndicadorRam
+        })
+        [System.Windows.Controls.DockPanel]::SetDock($btn, "Right")
+        [void]$fila.Children.Add($btn)
+        $txt = New-Object System.Windows.Controls.TextBlock
+        $txt.VerticalAlignment = "Center"
+        $txt.TextTrimming = "CharacterEllipsis"
+        $mbTxt = if ($g.MB -ge 1024) { "{0:N1} GB" -f ($g.MB / 1024) } else { "$($g.MB) MB" }
+        $txt.Text = "$($g.Proc)   $mbTxt" + $(if ($g.Abierta) { "   ($($g.Abierta))" } else { "   (en segundo plano)" })
+        [void]$fila.Children.Add($txt)
+        $marco.Child = $fila
+        [void]$script:PanelProcesos.Children.Add($marco)
+    }
+}
+
+function Update-EstadoRendimiento {
+    foreach ($par in @(@($script:ItemFondo, "Aplicado en este equipo"), @($script:ItemServiciosRam, "Ya están en manual"))) {
+        $t = $script:TarjetaPorId[$par[0].Key]
+        if (-not $t) { continue }
+        if (Test-AjusteAplicado $par[0]) {
+            $t.Estado.Text = "$([char]0x2714) $($par[1])"
+            $t.Estado.Foreground = Get-Pincel "#16A34A"
+            $t.Estado.Visibility = "Visible"
+        } else {
+            $t.Estado.Visibility = "Collapsed"
+        }
+    }
+}
+Update-EstadoRendimiento
+Update-IndicadorRam
+
+$script:TemporizadorRam = New-Object System.Windows.Threading.DispatcherTimer
+$script:TemporizadorRam.Interval = [TimeSpan]::FromSeconds(3)
+$script:TemporizadorRam.Add_Tick({
+    $sel = [string]$script:UI.Pestanas.SelectedItem.Name
+    if ($sel -eq "TabInicio" -or $sel -eq "TabRendimiento") { Update-IndicadorRam }
+})
+$script:TemporizadorRam.Start()
+
 # ---------------------------------------------------------------- Trabajo en segundo plano
 $script:Trabajo = $null
+$script:AlTerminar = $null
 
 function Set-Ocupado([bool]$ocupado) {
     foreach ($b in "BtnRecomendados","BtnLimpiar","BtnDeshacer","BtnPreferencias","BtnAplicar","BtnAppsInstalar","BtnAppsActualizar","BtnAppsDesinstalar","BtnAppsTodo","BtnAppsComprobar") {
@@ -1937,7 +2726,14 @@ $temporizador.Add_Tick({
         }
         Update-VistaAjustes
         if ($script:TxtModoUpdates) { $script:TxtModoUpdates.Text = "Modo actual: " + (Get-ModoUpdates) }
+        Update-EstadoRendimiento
         Show-ResumenTrabajo
+        if ($script:AlTerminar) {
+            $siguiente = $script:AlTerminar
+            $script:AlTerminar = $null
+            & $siguiente
+        }
+        if (-not $script:Trabajo) { Invoke-ComprobacionPestana }
     }
 })
 $temporizador.Start()
@@ -2047,7 +2843,15 @@ $script:Ventana.Add_Closing({
 Escribir-Log "Optimizador iniciado. Registro: $global:ArchivoLog"
 if ($Prueba) {
     $temporizador.Stop()
+    $script:TemporizadorRam.Stop()
     return
 }
+# Ajusta la ventana a pantallas pequeñas (portátiles de 1366x768)
+$zona = [System.Windows.SystemParameters]::WorkArea
+if ($script:Ventana.Height -gt $zona.Height - 10) { $script:Ventana.Height = $zona.Height - 10 }
+if ($script:Ventana.Width -gt $zona.Width - 10) { $script:Ventana.Width = $zona.Width - 10 }
+# Al abrir se analiza el equipo para mostrar las recomendaciones
+$script:Ventana.Add_ContentRendered({ Start-Analisis })
 [void]$script:Ventana.ShowDialog()
 $temporizador.Stop()
+$script:TemporizadorRam.Stop()
