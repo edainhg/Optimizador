@@ -684,6 +684,11 @@ $xaml = @'
           <StackPanel x:Name="PanelRendimiento" Margin="14"/>
         </ScrollViewer>
       </TabItem>
+      <TabItem x:Name="TabControladores" Header="Controladores" Tag="&#xE950;">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelControladores" Margin="14"/>
+        </ScrollViewer>
+      </TabItem>
       <TabItem x:Name="TabConfig" Header="Configuración" Tag="&#xE912;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel x:Name="PanelConfig" Margin="12"/>
@@ -754,7 +759,7 @@ $xaml = @'
 $lector = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
 $script:Ventana = [Windows.Markup.XamlReader]::Load($lector)
 $ui = @{}
-foreach ($n in "PanelAjustes","PanelPreferencias","PanelAyuda","PanelSeguridad","PanelApps","TxtBuscarApp","BtnAppsInstalar","BtnAppsActualizar","BtnAppsDesinstalar","BtnAppsTodo","BtnAppsLimpiar","BtnAppsComprobar","BtnAppsActualizables","BtnAppsPanel","TxtWinget","PanelReparaciones","PanelInforme","PanelConfig","BtnPresetEstandar","BtnPresetMinimo","BtnExportar","BtnImportar","BtnRecomendados","BtnLimpiar","BtnDeshacer","BtnRestaurar","BtnPreferencias","BtnAplicar","TxtEstado","Barra","TxtLog","Pestanas","ImgLogo","PanelInicio","PanelRendimiento","TxtEquipo") {
+foreach ($n in "PanelAjustes","PanelPreferencias","PanelAyuda","PanelSeguridad","PanelApps","TxtBuscarApp","BtnAppsInstalar","BtnAppsActualizar","BtnAppsDesinstalar","BtnAppsTodo","BtnAppsLimpiar","BtnAppsComprobar","BtnAppsActualizables","BtnAppsPanel","TxtWinget","PanelReparaciones","PanelInforme","PanelConfig","BtnPresetEstandar","BtnPresetMinimo","BtnExportar","BtnImportar","BtnRecomendados","BtnLimpiar","BtnDeshacer","BtnRestaurar","BtnPreferencias","BtnAplicar","TxtEstado","Barra","TxtLog","Pestanas","ImgLogo","PanelInicio","PanelRendimiento","TxtEquipo","PanelControladores") {
     $ui[$n] = $script:Ventana.FindName($n)
 }
 $script:UI = $ui
@@ -771,6 +776,120 @@ $script:Colores = @{
 }
 $conversor = New-Object System.Windows.Media.BrushConverter
 function Get-Pincel([string]$hex) { return $conversor.ConvertFromString($hex) }
+
+# ---------------------------------------------------------------- Detalles: qué hace cada opción
+# Resumen corto siempre visible; el detalle completo se abre con "Ver detalles".
+$script:NombresInicio = @{ Automatic = "automático"; AutomaticDelayedStart = "automático (retrasado)"; Manual = "manual"; Disabled = "desactivado"; Boot = "arranque"; System = "sistema" }
+
+function Get-DetalleTecnico($Item) {
+    $l = New-Object System.Collections.Generic.List[string]
+    if ($Item.Detalle) { $l.Add([string]$Item.Detalle) }
+
+    $regs = @($Item.registry | Where-Object { $_ })
+    if ($regs.Count) {
+        if ($l.Count) { $l.Add("") }
+        $l.Add("Cambios en el registro de Windows:")
+        foreach ($r in $regs) {
+            $ruta = "$($r.Path)\$($r.Name)"
+            if ($r.Value -eq "<RemoveEntry>") { $l.Add("  • Borra $ruta") }
+            else {
+                $orig = if ($r.OriginalValue -eq "<RemoveEntry>") { "normalmente no existe" } else { "normal: $($r.OriginalValue)" }
+                $l.Add("  • $ruta = $($r.Value)   ($orig)")
+            }
+        }
+    }
+    $svcs = @($Item.service | Where-Object { $_ })
+    if ($svcs.Count) {
+        if ($l.Count) { $l.Add("") }
+        $l.Add("Servicios de Windows:")
+        foreach ($s in $svcs) {
+            $a = $script:NombresInicio[[string]$s.StartupType]; if (-not $a) { $a = $s.StartupType }
+            $o = $script:NombresInicio[[string]$s.OriginalType]; if (-not $o) { $o = $s.OriginalType }
+            $l.Add("  • $($s.Name): inicio $a   (normal: $o)")
+        }
+    }
+    $scripts = @($Item.InvokeScript | Where-Object { $_ })
+    if ($scripts.Count) {
+        $lineas = @(($scripts -join "`n") -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith("#") })
+        if ($lineas.Count) {
+            if ($l.Count) { $l.Add("") }
+            $l.Add("Comandos que ejecuta ($($lineas.Count) línea(s)):")
+            foreach ($ln in ($lineas | Select-Object -First 8)) {
+                $l.Add("  " + $(if ($ln.Length -gt 120) { $ln.Substring(0, 117) + "..." } else { $ln }))
+            }
+            if ($lineas.Count -gt 8) { $l.Add("  ... y $($lineas.Count - 8) línea(s) más.") }
+        }
+    }
+    if ($Item.Grupo -eq "Preferencias") {
+        if ($l.Count) { $l.Add("") }
+        $l.Add("Cómo deshacerlo: cambia la casilla y pulsa 'Aplicar preferencias'.")
+    } elseif ($Item.Grupo) {
+        if ($l.Count) { $l.Add("") }
+        if ($regs.Count -or $svcs.Count) { $l.Add("Cómo deshacerlo: márcalo y pulsa 'Deshacer seleccionados'. Vuelve exactamente a como estaba (se guarda una copia antes de aplicar).") }
+        elseif (@($Item.UndoScript | Where-Object { $_ }).Count) { $l.Add("Cómo deshacerlo: márcalo y pulsa 'Deshacer seleccionados' (ejecuta el script inverso).") }
+        else { $l.Add("No tiene deshacer automático: si algo falla, usa el punto de restauración.") }
+    }
+    return ($l -join "`n")
+}
+
+function Add-Detalles($Pila, $Item) {
+    $hay = $Item.Detalle -or @($Item.registry | Where-Object { $_ }).Count -or @($Item.service | Where-Object { $_ }).Count -or @($Item.InvokeScript | Where-Object { $_ }).Count
+    if (-not $hay) { return }
+    $exp = New-Object System.Windows.Controls.Expander
+    $exp.Header = "Ver detalles: qué hace exactamente"
+    $exp.Foreground = Get-Pincel "#2563EB"
+    $exp.FontSize = 12
+    $exp.Margin = "16,4,0,0"
+    $exp.Tag = $Item
+    # El texto se arma al abrirlo, así la ventana carga igual de rápido
+    $exp.Add_Expanded({
+        param($origen, $e)
+        if ($origen.Content) { return }
+        $txt = New-Object System.Windows.Controls.TextBox
+        $txt.Text = Get-DetalleTecnico $origen.Tag
+        $txt.IsReadOnly = $true
+        $txt.TextWrapping = "Wrap"
+        $txt.BorderThickness = 0
+        $txt.Background = Get-Pincel "#F3F4F6"
+        $txt.Foreground = Get-Pincel "#374151"
+        $txt.FontFamily = "Segoe UI"
+        $txt.FontSize = 12
+        $txt.Padding = "10,8"
+        $txt.Margin = "0,4,0,2"
+        $origen.Content = $txt
+    })
+    [void]$Pila.Children.Add($exp)
+}
+
+$script:DetallesAcciones = @{
+    "Análisis rápido con Microsoft Defender" = "1. Actualiza las firmas de Defender desde Microsoft.`n2. Analiza memoria, arranque y carpetas donde suele esconderse el malware (5 a 15 minutos).`n3. Escribe en el registro de abajo las amenazas encontradas en este análisis.`nDefender pone en cuarentena lo que detecta; no borra tus archivos."
+    "Análisis completo con Microsoft Defender" = "1. Actualiza las firmas de Defender.`n2. Revisa TODOS los archivos de todos los discos (1 hora o más; el equipo irá más lento mientras tanto).`n3. Muestra las amenazas encontradas.`nSi otro antivirus (ESET, etc.) está activo, Defender está en modo pasivo y este análisis puede no estar disponible."
+    "Segunda opinión: Microsoft Safety Scanner" = "1. Descarga msert.exe (unos 200 MB) directamente de Microsoft.`n2. Comprueba que esté firmado por Microsoft; si no, lo borra.`n3. Abre el asistente para que elijas análisis rápido o completo.`nNo se instala ni choca con tu antivirus. El informe queda en C:\Windows\debug\msert.log."
+    "Abrir mi antivirus" = "Abre la ventana de Seguridad de Windows, donde se ve el antivirus activo y su estado. No cambia nada."
+    "Reparar archivos de Windows (DISM + SFC)" = "1. DISM /RestoreHealth: compara la imagen de Windows con la de Microsoft y descarga lo dañado (10 a 30 min).`n2. SFC /scannow: revisa los archivos del sistema y repone los que estén corruptos (10 a 20 min).`n3. Muestra el resultado de cada paso. El detalle completo queda en C:\Windows\Logs\CBS\CBS.log.`nNo toca tus documentos ni programas. Reinicia al terminar."
+    "Ver programas que arrancan con Windows" = "Lista en el registro de abajo los programas que se abren al encender (nombre y comando). Solo lee, no cambia nada."
+    "Limpiar caché DNS" = "Ejecuta 'ipconfig /flushdns': borra la lista de direcciones de páginas guardada en el equipo para que se vuelvan a consultar. Es inmediato y no afecta a nada más."
+    "Restablecer la red" = "1. Limpia la caché DNS.`n2. 'netsh winsock reset': devuelve Winsock a su estado de fábrica (arregla programas que rompen la conexión).`n3. 'netsh int ip reset' para IPv4 e IPv6: borra la configuración TCP/IP.`nHay que reiniciar. Si tenías IP fija puesta a mano, hay que volver a escribirla."
+    "Reparar Windows Update" = "1. Detiene los servicios wuauserv, bits, cryptsvc y msiserver.`n2. Renombra las carpetas SoftwareDistribution y catroot2 a .old (Windows crea unas nuevas y limpias).`n3. Vuelve a arrancar los servicios.`nLas actualizaciones pendientes se vuelven a descargar. Reinicia y busca actualizaciones."
+    "Desatascar la impresora" = "1. Detiene el servicio de cola de impresión (Spooler).`n2. Borra los trabajos pendientes de C:\Windows\System32\spool\PRINTERS.`n3. Vuelve a arrancar el servicio.`nNo borra impresoras ni controladores; solo los documentos en cola."
+    "Reparar Microsoft Store" = "Ejecuta wsreset.exe, la herramienta oficial que borra la caché de la Tienda. No desinstala apps ni cierra tu sesión. La Tienda se abre sola al terminar."
+    "Reparar winget" = "1. Vuelve a registrar el 'Instalador de aplicación' de Microsoft (que incluye winget).`n2. Restablece y actualiza sus orígenes de descarga.`n3. Si winget no existe, abre la Tienda en la página del Instalador de aplicación para que lo instales."
+    "Reconstruir iconos y miniaturas" = "1. Cierra el Explorador (la barra y el escritorio desaparecen unos segundos).`n2. Borra IconCache.db, iconcache_*.db y thumbcache_*.db de tu perfil.`n3. Vuelve a abrir el Explorador, que crea las cachés de nuevo."
+    "Sincronizar la hora" = "1. Pone el servicio de hora de Windows (w32time) en manual y lo arranca.`n2. Ejecuta 'w32tm /resync /force' para pedir la hora al servidor de Internet.`n3. Muestra la hora resultante."
+    "Generar informe del equipo" = "Recopila: fabricante, modelo y número de serie, BIOS, Windows y activación, procesador, RAM y ranuras, gráficos, discos y su salud, batería, red e IP, antivirus, BitLocker, dispositivos con errores, errores críticos de los últimos 7 días y programas de arranque.`nLo guarda en un .txt en %LOCALAPPDATA%\OptimizadorES\Informes y lo abre. Solo lee, no cambia nada."
+    "Informe de batería (portátiles)" = "Ejecuta 'powercfg /batteryreport', el informe oficial de Windows: capacidad original frente a la actual (desgaste), ciclos de carga e historial de uso. Se guarda como .html y se abre en el navegador."
+    "Abrir carpeta de informes" = "Abre en el Explorador la carpeta donde se guardan los informes generados."
+    "Liberar RAM ahora" = "1. Recorta la memoria de trabajo de todos los procesos (los programas devuelven a Windows la RAM reservada que no usan).`n2. Escribe a disco la lista de memoria modificada.`n3. Vacía la caché en espera (archivos que Windows guardó en RAM por si los volvías a abrir).`n4. Muestra la RAM libre antes y después.`nNo cierra ningún programa. Es temporal: la memoria se vuelve a ocupar al usar los programas."
+    "Programas abiertos que más RAM usan" = "Muestra los programas de tu sesión que ocupan más de 50 MB, sumando todos sus procesos (por ejemplo, todas las pestañas de Chrome).`nAl pulsar 'Cerrar' se pide primero que se cierren normalmente (como pulsar la X) y, si no responden en un segundo, se fuerzan. Los procesos del sistema y el antivirus no aparecen."
+    "Programas que arrancan con Windows" = "'Abrir' lleva a Configuración > Aplicaciones > Inicio, donde activas o desactivas cada programa con un interruptor (es reversible).`n'Ver lista' escribe en el registro de abajo los programas y su comando, sin cambiar nada."
+    "Memoria virtual en automático" = "Si el archivo de paginación (pagefile.sys) está en manual o desactivado, lo pone 'administrado por el sistema' (Win32_ComputerSystem.AutomaticManagedPagefile = true). Si ya está en automático, no cambia nada. Se aplica al reiniciar."
+    "Liberador de espacio de Windows" = "Abre cleanmgr.exe para la unidad C:. Tú marcas qué borrar (papelera, miniaturas, archivos de programa descargados...). Con 'Limpiar archivos del sistema' también ofrece restos de actualizaciones."
+    "Ver qué ocupa espacio" = "Abre Configuración > Sistema > Almacenamiento: muestra cuánto ocupan apps, archivos temporales, documentos, etc., y deja activar el Sensor de almacenamiento para que Windows limpie solo."
+    "Crear acceso directo en el Escritorio" = "1. Copia el optimizador a %LOCALAPPDATA%\OptimizadorES.`n2. Crea un acceso directo con su icono en el Escritorio y en el menú Inicio, que lo abre (al abrirse pide permisos de administrador).`nNo cambia nada de Windows."
+    "Predeterminado de Windows" = "Quita las directivas que limitan Windows Update y deja las actualizaciones como vienen de fábrica (mismo script que WinUtil)."
+    "Recomendado: solo seguridad" = "Aplica las directivas de WinUtil: las actualizaciones de calidad se retrasan 4 días y las de características 365 días, y no se instalan controladores por Windows Update. Las de seguridad siguen llegando."
+    "Desactivar actualizaciones" = "Desactiva los servicios y tareas de Windows Update y bloquea las actualizaciones automáticas (script de WinUtil). El equipo deja de recibir parches de seguridad hasta que elijas 'Predeterminado'."
+}
 
 function New-Tarjeta {
     param($Item, [bool]$Marcado)
@@ -826,6 +945,8 @@ function New-Tarjeta {
         $aviso.Margin = "20,3,0,0"
         [void]$pila.Children.Add($aviso)
     }
+
+    Add-Detalles $pila $Item
 
     $estadoTxt = New-Object System.Windows.Controls.TextBlock
     $estadoTxt.FontWeight = "SemiBold"
@@ -1000,8 +1121,10 @@ Write-Output "Si ves algo que no reconoces, búscalo en Internet antes de borrar
 '@
 
 function New-TarjetaAccion {
-    param([string]$Titulo, [string]$Descripcion, [string]$Riesgo, [string]$Aviso, [string]$TextoBoton, [scriptblock]$Accion, [bool]$Permitido = $true, [string]$Motivo = "", $Panel = $null, [string]$Clave = "", [string]$TextoBoton2 = "", [scriptblock]$Accion2 = $null)
-    $item = [pscustomobject]@{ Nombre = $Titulo; Descripcion = $Descripcion; Riesgo = $Riesgo; Aviso = $Aviso }
+    param([string]$Titulo, [string]$Descripcion, [string]$Riesgo, [string]$Aviso, [string]$TextoBoton, [scriptblock]$Accion, [bool]$Permitido = $true, [string]$Motivo = "", $Panel = $null, [string]$Clave = "", [string]$TextoBoton2 = "", [scriptblock]$Accion2 = $null, [string]$Detalle = "", $Origen = $null)
+    if (-not $Detalle) { $Detalle = $script:DetallesAcciones[$Titulo] }
+    $item = [pscustomobject]@{ Nombre = $Titulo; Descripcion = $Descripcion; Riesgo = $Riesgo; Aviso = $Aviso; Detalle = $Detalle
+        registry = @($Origen.registry); service = @($Origen.service); InvokeScript = @($Origen.InvokeScript) }
     $t = New-Tarjeta -Item $item -Marcado $false
     # La tarjeta usa una casilla; aquí se cambia por un botón
     $fila = $t.Casilla.Parent
@@ -1830,6 +1953,8 @@ $pC = $script:UI.PanelConfig
 $script:FeaturesComprobadas = $false
 foreach ($f in @($script:Extras.Features)) {
     New-TarjetaAccion -Panel $pC -Clave "FEAT:$($f.Key)" -Titulo $f.Nombre -TextoBoton "Activar" -Riesgo $f.Riesgo `
+        -Detalle ("Activa estos componentes opcionales de Windows: " + (@($f.Features) -join ", ") + ". Si ya están activados, no cambia nada. Para quitarlos: Panel de control > Programas > Activar o desactivar las características de Windows.") `
+        -Origen ([pscustomobject]@{ InvokeScript = @($f.Script) }) `
         -Descripcion $f.Descripcion -Aviso $f.Aviso -Accion ({
             $uid = [string]$this.Uid
             $feat = @($script:Extras.Features | Where-Object { "FEAT:$($_.Key)" -eq $uid })[0]
@@ -2325,7 +2450,7 @@ $script:AccionesAnalisis = @{
     Informe      = @{ Texto = "Ver";           Hacer = { Select-Pestana "TabInforme" } }
     Bateria      = @{ Texto = "Ver informe";   Hacer = { Start-Pasos -Pasos @(New-PasoScript -Nombre "Informe de batería" -Codigo $script:codigoBateria) } }
     Updates      = @{ Texto = "Abrir";         Hacer = { Start-Process "ms-settings:windowsupdate" } }
-    Dispositivos = @{ Texto = "Abrir";         Hacer = { Start-Process "devmgmt.msc" } }
+    Dispositivos = @{ Texto = "Ver";           Hacer = { Select-Pestana "TabControladores"; Update-ListaDispositivos } }
     Reiniciar    = @{ Texto = "Reiniciar";     Hacer = {
         if ([System.Windows.MessageBox]::Show("¿Reiniciar el equipo ahora? Guarda tu trabajo antes.", "Optimizador", "YesNo", "Question") -eq "Yes") { Restart-Computer -Force }
     } }
@@ -2507,12 +2632,14 @@ $script:PanelProcesos.Margin = "0,0,0,8"
 [void]$pR.Children.Add($script:PanelProcesos)
 
 New-TarjetaAccion -Panel $pR -Clave "OPT_FONDO" -Titulo "Evitar apps en segundo plano" -TextoBoton "Aplicar" -TextoBoton2 "Deshacer" -Riesgo "Bajo" `
+    -Origen $script:ItemFondo -Detalle "Se aplican directivas (las mismas que usan las empresas) para que estas apps no sigan en memoria al cerrarlas. Antes de aplicar se guarda cómo estaba cada valor; 'Deshacer' lo deja exactamente igual que antes. Se nota del todo tras reiniciar." `
     -Descripcion "Edge y Chrome dejan de quedarse abiertos al cerrar la ventana y Edge no se precarga al encender. También se apagan los Widgets y las apps de la Tienda en segundo plano." `
     -Aviso "Edge y Chrome dirán 'Administrado por tu organización': es por estas políticas. Las apps de la Tienda no avisarán hasta que las abras." `
     -Accion { Invoke-AccionAnalisis "Fondo" } `
     -Accion2 { Start-Pasos -Pasos @([pscustomobject]@{ Item = $script:ItemFondo; Deshacer = $true }) -Titulo "Deshacer: apps en segundo plano" }
 
 New-TarjetaAccion -Panel $pR -Clave "OPT_SERVICIOS_RAM" -Titulo "Servicios que no hacen falta siempre" -TextoBoton "Poner en manual" -TextoBoton2 "Deshacer" -Riesgo "Bajo" `
+    -Origen $script:ItemServiciosRam -Detalle "DiagTrack y dmwappushservice: telemetría. MapsBroker: mapas sin conexión. RetailDemo: modo tienda. Fax. WerSvc: informe de errores. PcaSvc: asistente de compatibilidad. En 'manual' no se borran ni se desactivan: Windows los arranca si algo los pide. Se guarda cómo estaban y 'Deshacer' los deja igual." `
     -Descripcion "Telemetría, mapas sin conexión, fax, modo tienda, informe de errores y asistente de compatibilidad pasan a manual: solo arrancan si algo los necesita." `
     -Aviso "Ninguno para el uso normal. Se guarda cómo estaban para poder deshacerlo exacto." `
     -Accion { Start-Pasos -Pasos @([pscustomobject]@{ Item = $script:ItemServiciosRam; Deshacer = $false }) -Titulo "Servicios en manual" } `
@@ -2622,6 +2749,252 @@ function Update-EstadoRendimiento {
 }
 Update-EstadoRendimiento
 Update-IndicadorRam
+
+# ---------------------------------------------------------------- Pestaña Controladores
+$script:codigoBuscarDrivers = @'
+Write-Output "Buscando controladores nuevos en Windows Update (1 a 3 minutos)..."
+$sesionWU = New-Object -ComObject Microsoft.Update.Session
+$sesionWU.ClientApplicationID = "OptimizadorES"
+$buscador = $sesionWU.CreateUpdateSearcher()
+$buscador.ServerSelection = 2
+$resultado = $buscador.Search("IsInstalled=0 and Type='Driver' and IsHidden=0")
+foreach ($u in $resultado.Updates) {
+    $fecha = try { ([datetime]$u.DriverVerDate).ToString("yyyy-MM-dd") } catch { "" }
+    [void]$global:Estado.Drivers.Add(@{
+        Id = [string]$u.Identity.UpdateID; Titulo = [string]$u.Title; Clase = [string]$u.DriverClass
+        Fabricante = [string]$u.DriverManufacturer; Modelo = [string]$u.DriverModel; Fecha = $fecha
+        MB = [math]::Round([double]$u.MaxDownloadSize / 1MB, 1)
+    })
+    Write-Output " - $($u.Title)"
+}
+if ($resultado.Updates.Count -eq 0) { Write-Output "Windows Update no tiene controladores nuevos para este equipo." }
+else { Write-Output "Encontrados: $($resultado.Updates.Count). Marca los que quieras en la pestaña Controladores y pulsa 'Instalar seleccionados'." }
+'@
+
+function Get-CodigoInstalarDrivers([string[]]$Ids) {
+    $lista = ($Ids | ForEach-Object { "'$_'" }) -join ","
+    return @"
+`$ids = @($lista)
+Write-Output "Creando punto de restauración antes de instalar controladores..."
+try {
+    Enable-ComputerRestore -Drive "`$env:SystemDrive\" -ErrorAction SilentlyContinue
+    Checkpoint-Computer -Description "OptimizadorES - controladores" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+    Write-Output "Punto de restauración creado."
+} catch { Write-Warning "No se pudo crear el punto de restauración (Windows solo permite uno cada 24 h): `$(`$_.Exception.Message)" }
+`$sesionWU = New-Object -ComObject Microsoft.Update.Session
+`$sesionWU.ClientApplicationID = "OptimizadorES"
+`$buscador = `$sesionWU.CreateUpdateSearcher()
+`$buscador.ServerSelection = 2
+`$resultado = `$buscador.Search("IsInstalled=0 and Type='Driver' and IsHidden=0")
+`$elegidos = @(foreach (`$u in `$resultado.Updates) { if (`$ids -contains [string]`$u.Identity.UpdateID) { `$u } })
+if (`$elegidos.Count -eq 0) { Write-Warning "Los controladores elegidos ya no aparecen como pendientes (quizá ya se instalaron)."; return }
+`$reiniciar = `$false
+`$n = 0
+foreach (`$u in `$elegidos) {
+    `$n++
+    `$global:Estado.Texto = "Controlador `$n de `$(`$elegidos.Count): `$(`$u.Title)"
+    `$global:Estado.Progreso = [int](100 * (`$n - 1) / `$elegidos.Count)
+    if (-not `$u.EulaAccepted) { `$u.AcceptEula() }
+    `$uno = New-Object -ComObject Microsoft.Update.UpdateColl
+    [void]`$uno.Add(`$u)
+    Write-Output "Descargando (`$n/`$(`$elegidos.Count)): `$(`$u.Title)"
+    `$descarga = `$sesionWU.CreateUpdateDownloader()
+    `$descarga.Updates = `$uno
+    `$rd = `$descarga.Download()
+    if (`$rd.ResultCode -ne 2) { Write-Warning "No se pudo descargar (código `$(`$rd.ResultCode))."; continue }
+    Write-Output "Instalando..."
+    `$instalador = `$sesionWU.CreateUpdateInstaller()
+    `$instalador.Updates = `$uno
+    `$ri = `$instalador.Install()
+    if (`$ri.ResultCode -eq 2) {
+        Write-Output "Instalado: `$(`$u.Title)"
+        if (`$ri.RebootRequired) { `$reiniciar = `$true }
+    } else {
+        Write-Warning "Falló la instalación de `$(`$u.Title) (código `$(`$ri.ResultCode))."
+    }
+}
+if (`$reiniciar) { Write-Output "Hay que REINICIAR el equipo para terminar de instalar." }
+"@
+}
+
+$script:codigoCopiaDrivers = @'
+$destino = Join-Path $env:LOCALAPPDATA ("OptimizadorES\Controladores_{0:yyyyMMdd_HHmm}" -f (Get-Date))
+New-Item -ItemType Directory -Force -Path $destino | Out-Null
+Write-Output "Copiando los controladores que no son de Microsoft a $destino (1 a 5 minutos)..."
+$copiados = @(Export-WindowsDriver -Online -Destination $destino -ErrorAction Stop)
+Write-Output "Copiados $($copiados.Count) controladores."
+Write-Output "Para reinstalar uno: Administrador de dispositivos > clic derecho > Actualizar controlador > Buscar en mi equipo > esta carpeta."
+Start-Process explorer.exe -ArgumentList "`"$destino`""
+'@
+
+$script:codigoListaDrivers = @'
+$lista = @(Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue |
+    Where-Object { $_.DriverProviderName -and $_.DriverProviderName -notmatch "^Microsoft" -and $_.DeviceName } |
+    Sort-Object DriverDate)
+Write-Output "Controladores de otros fabricantes instalados: $($lista.Count) (los más antiguos primero)"
+foreach ($d in $lista) {
+    $fecha = if ($d.DriverDate) { ([datetime]$d.DriverDate).ToString("yyyy-MM-dd") } else { "sin fecha" }
+    Write-Output ("{0}  {1}  v{2}  ({3})" -f $fecha, $d.DeviceName, $d.DriverVersion, $d.DriverProviderName)
+}
+'@
+
+$script:ErroresDispositivo = @{
+    1 = "no está bien configurado"; 3 = "el controlador está dañado o falta memoria"; 10 = "no puede iniciarse"
+    12 = "no encuentra recursos libres"; 14 = "necesita reiniciar"; 18 = "hay que reinstalar el controlador"
+    19 = "el registro de su configuración está dañado"; 21 = "Windows lo está quitando"; 24 = "no está presente o falta el controlador"
+    28 = "no tiene controlador instalado"; 31 = "el controlador no se carga"; 39 = "el controlador está dañado o falta"
+    43 = "Windows lo detuvo porque informó problemas"; 45 = "no está conectado"; 52 = "la firma del controlador no es válida"
+}
+
+$script:DetallesAcciones["Dispositivos con problemas"] = "'Revisar' consulta a Windows (Win32_PnPEntity) qué dispositivos tienen un código de error y explica cada uno en palabras normales. Los que desactivaste a propósito no salen. 'Administrador de dispositivos' abre la herramienta de Windows. No cambia nada."
+$script:DetallesAcciones["Buscar controladores nuevos (Windows Update)"] = "1. 'Buscar' pregunta a Windows Update (los mismos servidores que usa Configuración) por controladores no instalados para tus dispositivos. Solo busca, no instala.`n2. Aparece la lista con tipo, fabricante, fecha y tamaño. Desmarca los que no quieras.`n3. 'Instalar seleccionados': intenta crear un punto de restauración, descarga e instala uno por uno y avisa si hay que reiniciar.`nSi un controlador nuevo da problemas: Administrador de dispositivos > el dispositivo > Propiedades > Controlador > Revertir al controlador anterior."
+$script:DetallesAcciones["Copia de seguridad de controladores"] = "Ejecuta 'Export-WindowsDriver -Online': copia todos los controladores de otros fabricantes (no los de Microsoft) a %LOCALAPPDATA%\OptimizadorES\Controladores_fecha y abre la carpeta. Cópiala a una USB si vas a formatear. No cambia nada del equipo."
+$script:DetallesAcciones["Ver controladores instalados"] = "Lee la lista de controladores firmados (Win32_PnPSignedDriver), quita los de Microsoft y escribe en el registro fecha, dispositivo, versión y fabricante, empezando por los más antiguos. Solo lee."
+$pD = $script:UI.PanelControladores
+[void]$pD.Children.Add((New-Titulo "Controladores" "Los controladores (drivers) hacen que Windows se entienda con cada pieza: gráficos, Wi-Fi, audio, touchpad... Aquí puedes ver si alguno falla, actualizarlos y guardar una copia."))
+
+New-TarjetaAccion -Panel $pD -Titulo "Dispositivos con problemas" -TextoBoton "Revisar" -TextoBoton2 "Administrador de dispositivos" -Riesgo "Bajo" `
+    -Descripcion "Muestra los dispositivos que Windows marca con error y qué les pasa." -Aviso "" `
+    -Accion { Update-ListaDispositivos } -Accion2 { Start-Process "devmgmt.msc" }
+$script:PanelDispositivos = New-Object System.Windows.Controls.StackPanel
+$script:PanelDispositivos.Margin = "0,0,0,8"
+[void]$pD.Children.Add($script:PanelDispositivos)
+
+New-TarjetaAccion -Panel $pD -Titulo "Buscar controladores nuevos (Windows Update)" -TextoBoton "Buscar" -Riesgo "Medio" `
+    -Descripcion "Pregunta a Windows Update si hay controladores más nuevos para tus dispositivos. Luego eliges cuáles instalar." `
+    -Aviso "Un controlador nuevo puede dar problemas con algún equipo. Antes de instalar se intenta crear un punto de restauración, y puedes volver atrás desde el Administrador de dispositivos (Revertir controlador)." `
+    -Accion {
+        $global:Estado.Drivers = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+        $script:PanelDrivers.Children.Clear()
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Buscar controladores" -Codigo $script:codigoBuscarDrivers) -Silencioso
+        if ($script:Trabajo) { $script:AlTerminar = { Show-Drivers } }
+    }
+$script:PanelDrivers = New-Object System.Windows.Controls.StackPanel
+$script:PanelDrivers.Margin = "0,0,0,8"
+[void]$pD.Children.Add($script:PanelDrivers)
+
+New-TarjetaAccion -Panel $pD -Titulo "Copia de seguridad de controladores" -TextoBoton "Copiar" -Riesgo "Bajo" `
+    -Descripcion "Guarda una copia de todos los controladores que no son de Microsoft. Útil antes de actualizar o formatear." `
+    -Aviso "" -Accion { Start-Pasos -Pasos @(New-PasoScript -Nombre "Copia de controladores" -Codigo $script:codigoCopiaDrivers) }
+
+New-TarjetaAccion -Panel $pD -Titulo "Ver controladores instalados" -TextoBoton "Ver lista" -Riesgo "Bajo" `
+    -Descripcion "Escribe en el registro de abajo los controladores de otros fabricantes con su fecha y versión, los más viejos primero." `
+    -Aviso "" -Accion { Start-Pasos -Pasos @(New-PasoScript -Nombre "Lista de controladores" -Codigo $script:codigoListaDrivers) }
+
+# Programa oficial del fabricante y de la tarjeta gráfica
+$script:WebsFabricante = @(
+    @{ Patron = "Dell";            Nombre = "Dell (SupportAssist / Dell Command Update)"; Url = "https://www.dell.com/support/home" },
+    @{ Patron = "HP|Hewlett";      Nombre = "HP (HP Support Assistant)";                   Url = "https://support.hp.com/drivers" },
+    @{ Patron = "Lenovo";          Nombre = "Lenovo (Lenovo Vantage / System Update)";     Url = "https://pcsupport.lenovo.com" },
+    @{ Patron = "ASUS";            Nombre = "ASUS (MyASUS)";                               Url = "https://www.asus.com/support/download-center/" },
+    @{ Patron = "Acer";            Nombre = "Acer (Acer Care Center)";                     Url = "https://www.acer.com/support" },
+    @{ Patron = "Micro-Star|MSI";  Nombre = "MSI (MSI Center)";                            Url = "https://www.msi.com/support/download" },
+    @{ Patron = "Microsoft";       Nombre = "Microsoft Surface";                           Url = "https://support.microsoft.com/surface" },
+    @{ Patron = "Samsung";         Nombre = "Samsung (Samsung Update)";                    Url = "https://www.samsung.com/support/" },
+    @{ Patron = "Toshiba|Dynabook";Nombre = "Dynabook / Toshiba";                          Url = "https://support.dynabook.com" }
+)
+$script:WebsGraficos = @(
+    @{ Patron = "NVIDIA"; Nombre = "NVIDIA";  Url = "https://www.nvidia.com/Download/index.aspx" },
+    @{ Patron = "AMD|Radeon"; Nombre = "AMD"; Url = "https://www.amd.com/en/support/download/drivers.html" },
+    @{ Patron = "Intel";  Nombre = "Intel (Driver & Support Assistant)"; Url = "https://www.intel.com/content/www/us/en/support/detect.html" }
+)
+$fabricante = ""; $modelo = ""; $graficas = @()
+try {
+    $csD = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+    $fabricante = [string]$csD.Manufacturer; $modelo = [string]$csD.Model
+    $graficas = @(Get-CimInstance Win32_VideoController -ErrorAction Stop | ForEach-Object { [string]$_.Name })
+} catch { }
+$webFab = @($script:WebsFabricante | Where-Object { $fabricante -match $_.Patron })[0]
+if ($webFab) {
+    $script:UrlFabricante = $webFab.Url
+    New-TarjetaAccion -Panel $pD -Titulo "Programa oficial de $($webFab.Nombre)" -TextoBoton "Abrir web" -Riesgo "Bajo" `
+        -Descripcion "Tu equipo es $fabricante $modelo. La web del fabricante tiene los controladores exactos para tu modelo (BIOS, chipset, touchpad, teclas especiales...)." `
+        -Aviso "" -Accion { Start-Process $script:UrlFabricante }
+}
+foreach ($w in $script:WebsGraficos) {
+    $tarjetaGpu = @($graficas | Where-Object { $_ -match $w.Patron })[0]
+    if (-not $tarjetaGpu) { continue }
+    New-TarjetaAccion -Panel $pD -Titulo "Controlador de gráficos $($w.Nombre)" -TextoBoton "Abrir web" -Riesgo "Bajo" `
+        -Descripcion "Tienes: $tarjetaGpu. El controlador del fabricante suele ser más nuevo que el de Windows Update (mejor para juegos y edición de vídeo)." `
+        -Aviso "" -Accion ([scriptblock]::Create("Start-Process '$($w.Url)'"))
+}
+
+function Update-ListaDispositivos {
+    $script:PanelDispositivos.Children.Clear()
+    $malos = @(Get-CimInstance Win32_PnPEntity -Filter "ConfigManagerErrorCode <> 0 AND ConfigManagerErrorCode <> 22" -ErrorAction SilentlyContinue)
+    $txt = New-Object System.Windows.Controls.TextBlock
+    $txt.TextWrapping = "Wrap"
+    $txt.Margin = "16,0,0,6"
+    if ($malos.Count -eq 0) {
+        $txt.Text = "$([char]0x2714) Todos los dispositivos funcionan bien."
+        $txt.Foreground = Get-Pincel "#16A34A"
+    } else {
+        $lineas = foreach ($m in $malos) {
+            $motivo = $script:ErroresDispositivo[[int]$m.ConfigManagerErrorCode]
+            if (-not $motivo) { $motivo = "error $($m.ConfigManagerErrorCode)" }
+            $nombreDisp = if ($m.Name) { $m.Name } else { $m.DeviceID }
+            "$([char]0x26A0) ${nombreDisp}: $motivo"
+        }
+        $txt.Text = ($lineas -join "`n") + "`n`nPrueba primero 'Buscar controladores nuevos'. Si sigue igual, descarga el controlador de la web del fabricante."
+        $txt.Foreground = Get-Pincel "#A85F00"
+    }
+    [void]$script:PanelDispositivos.Children.Add($txt)
+}
+
+function Show-Drivers {
+    $script:PanelDrivers.Children.Clear()
+    $script:CasillasDrivers = @()
+    $lista = @($global:Estado.Drivers)
+    if ($lista.Count -eq 0) {
+        $txt = New-Object System.Windows.Controls.TextBlock
+        $txt.Text = "$([char]0x2714) Windows Update no tiene controladores nuevos para este equipo."
+        $txt.Foreground = Get-Pincel "#16A34A"
+        $txt.Margin = "16,0,0,6"
+        [void]$script:PanelDrivers.Children.Add($txt)
+        return
+    }
+    foreach ($d in $lista) {
+        $marco = New-Object System.Windows.Controls.Border
+        $marco.Background = Get-Pincel "#FFFFFF"
+        $marco.BorderBrush = Get-Pincel "#E2E6EC"
+        $marco.BorderThickness = 1
+        $marco.CornerRadius = 6
+        $marco.Padding = "12,6"
+        $marco.Margin = "16,0,0,4"
+        $pila = New-Object System.Windows.Controls.StackPanel
+        $chk = New-Object System.Windows.Controls.CheckBox
+        $chk.Content = $d.Titulo
+        $chk.FontWeight = "SemiBold"
+        $chk.IsChecked = $true
+        $chk.Tag = $d.Id
+        [void]$pila.Children.Add($chk)
+        $info = New-Object System.Windows.Controls.TextBlock
+        $info.Foreground = Get-Pincel "#6B7280"
+        $info.Margin = "20,2,0,0"
+        $info.TextWrapping = "Wrap"
+        $info.Text = (@("Tipo: $($d.Clase)", "Fabricante: $($d.Fabricante)", "Fecha: $($d.Fecha)", "Descarga: $($d.MB) MB") | Where-Object { $_ -notmatch ": $" }) -join "   ·   "
+        [void]$pila.Children.Add($info)
+        $marco.Child = $pila
+        [void]$script:PanelDrivers.Children.Add($marco)
+        $script:CasillasDrivers += $chk
+    }
+    $btn = New-Object System.Windows.Controls.Button
+    $btn.Content = "Instalar seleccionados"
+    $btn.Style = $script:Ventana.FindResource("Primario")
+    $btn.Padding = "16,6"
+    $btn.Margin = "16,6,0,6"
+    $btn.HorizontalAlignment = "Left"
+    $btn.Tag = $true
+    $btn.Add_Click({
+        $ids = @($script:CasillasDrivers | Where-Object { $_.IsChecked } | ForEach-Object { [string]$_.Tag })
+        if ($ids.Count -eq 0) { return }
+        $msg = "Se instalarán $($ids.Count) controlador(es) de Windows Update.`r`n`r`nAntes se intenta crear un punto de restauración. Puede que la pantalla parpadee o se corte el Wi-Fi unos segundos mientras se instalan.`r`n`r`n¿Continuar?"
+        if ([System.Windows.MessageBox]::Show($msg, "Instalar controladores", "YesNo", "Question") -ne "Yes") { return }
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Instalar controladores" -Codigo (Get-CodigoInstalarDrivers -Ids $ids)) -Titulo "Instalar controladores" -OfrecerReinicio
+    })
+    $script:BotonesSeguridad += $btn
+    [void]$script:PanelDrivers.Children.Add($btn)
+}
 
 $script:TemporizadorRam = New-Object System.Windows.Threading.DispatcherTimer
 $script:TemporizadorRam.Interval = [TimeSpan]::FromSeconds(3)

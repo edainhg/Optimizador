@@ -79,7 +79,8 @@ Describe "Carga completa en modo prueba" {
         foreach ($u in "default", "security", "disable") { if ((Test-Sintaxis $script:Extras.Updates.$u).Count) { $malos += "Updates:$u" } }
         foreach ($v in "codigoDefender", "codigoSafetyScanner", "codigoReparar", "codigoArranque", "fixRed", "fixDns", "fixUpdate",
                        "fixImpresion", "fixTienda", "fixWinget", "fixIconos", "fixHora", "codigoInforme", "codigoBateria", "MotorCodigo",
-                       "codigoLiberarRam", "codigoPaginacion", "codigoAnalisis") {
+                       "codigoLiberarRam", "codigoPaginacion", "codigoAnalisis",
+                       "codigoBuscarDrivers", "codigoCopiaDrivers", "codigoListaDrivers") {
             $c = Get-Variable -Name $v -Scope Script -ValueOnly -ErrorAction SilentlyContinue
             if (-not $c) { $malos += "$v (no existe)" } elseif ((Test-Sintaxis $c).Count) { $malos += $v }
         }
@@ -106,6 +107,30 @@ Describe "Carga completa en modo prueba" {
         { Update-IndicadorRam } | Should -Not -Throw
         $script:TxtRamGrande.Text | Should -Match "GB en uso"
         { Update-ListaProcesos } | Should -Not -Throw
+    }
+
+    It "Cada ajuste explica en detalle qué cambia" {
+        foreach ($a in $script:Ajustes) {
+            $d = Get-DetalleTecnico $a
+            $d | Should -Not -BeNullOrEmpty -Because $a.Key
+        }
+    }
+
+    It "Tiene la pestaña Controladores y revisa los dispositivos" {
+        $script:Ventana.FindName("TabControladores") | Should -Not -BeNullOrEmpty
+        { Update-ListaDispositivos } | Should -Not -Throw
+        $script:PanelDispositivos.Children.Count | Should -BeGreaterThan 0
+    }
+
+    It "El script para instalar controladores tiene sintaxis válida" {
+        (Test-Sintaxis (Get-CodigoInstalarDrivers -Ids @("abc-123", "def-456"))).Count | Should -Be 0
+    }
+
+    It "Muestra la lista de controladores encontrados con su botón" {
+        $global:Estado.Drivers = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+        [void]$global:Estado.Drivers.Add(@{ Id = "x1"; Titulo = "Intel - Display - 31.0"; Clase = "Display"; Fabricante = "Intel"; Fecha = "2026-01-01"; MB = 300 })
+        { Show-Drivers } | Should -Not -Throw
+        @($script:CasillasDrivers).Count | Should -Be 1
     }
 
     It "Los IDs de apps no se repiten" {
