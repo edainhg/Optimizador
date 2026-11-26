@@ -304,6 +304,7 @@ Describe "Mejoras: perfiles, privacidad, arranque, programas, limpieza, priorida
     It "Arranque: lista los programas y los desactiva/activa como el Administrador de tareas" {
         $run = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
         $aprob = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+        if (-not (Test-Path $run)) { New-Item -Path $run -Force | Out-Null }
         New-ItemProperty -Path $run -Name "OptESPrueba" -Value "`"$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile" -PropertyType String -Force | Out-Null
         try {
             $global:Estado.Arranque = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
