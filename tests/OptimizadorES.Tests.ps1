@@ -80,7 +80,7 @@ Describe "Carga completa en modo prueba" {
         foreach ($v in "codigoDefender", "codigoSafetyScanner", "codigoReparar", "codigoArranque", "fixRed", "fixDns", "fixUpdate",
                        "fixImpresion", "fixTienda", "fixWinget", "fixIconos", "fixHora", "codigoInforme", "codigoBateria", "MotorCodigo",
                        "codigoLiberarRam", "codigoPaginacion", "codigoAnalisis",
-                       "codigoBuscarDrivers", "codigoCopiaDrivers", "codigoListaDrivers") {
+                       "codigoBuscarDrivers", "codigoCopiaDrivers", "codigoListaDrivers", "codigoRevision") {
             $c = Get-Variable -Name $v -Scope Script -ValueOnly -ErrorAction SilentlyContinue
             if (-not $c) { $malos += "$v (no existe)" } elseif ((Test-Sintaxis $c).Count) { $malos += $v }
         }
@@ -131,6 +131,23 @@ Describe "Carga completa en modo prueba" {
         [void]$global:Estado.Drivers.Add(@{ Id = "x1"; Titulo = "Intel - Display - 31.0"; Clase = "Display"; Fabricante = "Intel"; Fecha = "2026-01-01"; MB = 300 })
         { Show-Drivers } | Should -Not -Throw
         @($script:CasillasDrivers).Count | Should -Be 1
+    }
+
+    It "La revisión propia (sin antivirus) se ejecuta y muestra el resultado" {
+        $global:Estado.Revision = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+        { & ([scriptblock]::Create($script:codigoRevision)) | Out-Null } | Should -Not -Throw
+        { Show-Revision } | Should -Not -Throw
+        $script:PanelRevision.Children.Count | Should -BeGreaterThan 0
+    }
+
+    It "La revisión detecta un comando de minado" {
+        $global:Estado.Revision = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+        $falso = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Command", "Start-Sleep 60 # stratum+tcp://pool.supportxmr.com:3333 --donate-level 1" -PassThru -WindowStyle Hidden
+        try {
+            Start-Sleep -Seconds 2
+            & ([scriptblock]::Create($script:codigoRevision)) | Out-Null
+            @($global:Estado.Revision | Where-Object { $_.Nivel -eq "Alto" -and $_.Pid -eq $falso.Id }).Count | Should -BeGreaterThan 0
+        } finally { Stop-Process -Id $falso.Id -Force -ErrorAction SilentlyContinue }
     }
 
     It "Los IDs de apps no se repiten" {

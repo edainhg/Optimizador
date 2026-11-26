@@ -3112,6 +3112,309 @@ function Show-Drivers {
     [void]$script:PanelDrivers.Children.Add($btn)
 }
 
+# ---------------------------------------------------------------- Revisión propia (sin antivirus)
+# Busca señales típicas de mineros de criptomonedas y malware sin depender del antivirus instalado.
+# Solo lee: no borra ni cambia nada. Cada hallazgo trae qué es y qué hacer.
+$script:codigoRevision = @'
+$lista = $global:Estado.Revision
+function Add-Sospecha([string]$Nivel, [string]$Tipo, [string]$Titulo, [string]$Detalle, [string]$Ruta = "", [int]$IdProceso = 0) {
+    [void]$lista.Add(@{ Nivel = $Nivel; Tipo = $Tipo; Titulo = $Titulo; Detalle = $Detalle; Ruta = $Ruta; Pid = $IdProceso })
+}
+$firmas = @{}
+function Get-Firma([string]$Archivo) {
+    if (-not $Archivo -or -not (Test-Path -LiteralPath $Archivo -PathType Leaf)) { return $null }
+    if ($firmas.ContainsKey($Archivo)) { return $firmas[$Archivo] }
+    $f = $null
+    try {
+        $s = Get-AuthenticodeSignature -LiteralPath $Archivo -ErrorAction Stop
+        $quien = ""
+        if ($s.SignerCertificate) { $quien = ($s.SignerCertificate.Subject -split ",")[0] -replace '^CN=', '' -replace '"', '' }
+        $f = [pscustomobject]@{ Valida = ($s.Status -eq "Valid"); Firmante = $quien }
+    } catch { }
+    $firmas[$Archivo] = $f
+    return $f
+}
+function Get-RutaExe([string]$Comando) {
+    if (-not $Comando) { return "" }
+    $c = [Environment]::ExpandEnvironmentVariables($Comando.Trim())
+    if ($c.StartsWith('"')) { $c = $c.Substring(1); $i = $c.IndexOf('"'); if ($i -gt 0) { return $c.Substring(0, $i) } }
+    if ($c -match '^(.+?\.(exe|com|bat|cmd|ps1|vbs|js|scr|dll))(\s|,|$)') { return $Matches[1] }
+    return ($c -split '\s')[0]
+}
+$rutaRara = '\\AppData\\Local\\Temp\\|\\Windows\\Temp\\|\\Users\\Public\\|\\\$Recycle\.Bin\\|^[A-Za-z]:\\ProgramData\\[^\\]+\.(exe|scr|com)$|\\AppData\\Roaming\\[^\\]+\.(exe|scr|com)$|\\AppData\\Local\\[^\\]+\.(exe|scr|com)$|\\Fonts\\.+\.exe$'
+$comandoRaro = '(?i)(-enc(odedcommand)?\s|-e\s+[A-Za-z0-9+/=]{40,}|FromBase64String|DownloadString|DownloadFile|Invoke-Expression|\bIEX\b|-w(indowstyle)?\s+hid|mshta\s+(http|vbscript|javascript)|regsvr32\s+/s\s+/n\s+/u\s+/i:http|certutil.+-urlcache|bitsadmin\s+/transfer)'
+$nombresMineros = 'xmrig|xmr-stak|nicehash|nheqminer|ethminer|phoenixminer|t-rex|lolminer|nbminer|gminer|teamredminer|cpuminer|ccminer|minerd|cgminer|bfgminer|srbminer|wildrig|claymore|excavator|kawpowminer|xmrminer|minergate|cryptonight'
+$comandoMinero = '(?i)(stratum\+(tcp|ssl)|--donate-level|--coin[ =]|--algo[ =]|-a\s+(rx/0|cn/|kawpow|ethash)|nanopool|minexmr|supportxmr|hashvault|2miners|f2pool|moneroocean|unmineable|herominers)'
+
+# 1. Procesos: nombres y comandos de mineros
+Write-Output "1/9 Revisando los procesos en ejecución..."
+$procs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+foreach ($p in $procs) {
+    $nom = [string]$p.Name; $cmd = [string]$p.CommandLine
+    if ($nom -match "(?i)($nombresMineros)" -or $cmd -match $comandoMinero) {
+        Add-Sospecha "Alto" "Proceso" "Posible minero de criptomonedas en ejecución: $nom" "Su nombre o sus parámetros son los típicos de un programa de minado (usa tu procesador o tarjeta gráfica para ganar criptomonedas para otro). Comando: $($cmd.Substring(0, [Math]::Min(200, $cmd.Length)))" ([string]$p.ExecutablePath) ([int]$p.ProcessId)
+    } elseif ($cmd -match $comandoRaro -and $nom -match '(?i)^(powershell|pwsh|cmd|mshta|wscript|cscript|rundll32|regsvr32)\.exe$') {
+        Add-Sospecha "Medio" "Proceso" "Script oculto o codificado en ejecución ($nom)" "Hay un $nom con parámetros que suelen usar los programas maliciosos para esconderse (texto codificado, ventana oculta o descarga desde Internet). Algunos programas legítimos de empresa también lo hacen. Comando: $($cmd.Substring(0, [Math]::Min(200, $cmd.Length)))" "" ([int]$p.ProcessId)
+    }
+}
+
+# 2. Procesos que gastan mucho procesador (muestra de 5 segundos)
+Write-Output "2/9 Midiendo qué procesos usan el procesador (5 segundos; no toques nada si puedes)..."
+$nucleos = [Environment]::ProcessorCount
+$antes = @{}
+foreach ($pr in Get-Process) { try { $antes[$pr.Id] = $pr.TotalProcessorTime.TotalMilliseconds } catch { } }
+Start-Sleep -Seconds 5
+foreach ($pr in Get-Process) {
+    if ($pr.Id -eq $PID -or -not $antes.ContainsKey($pr.Id)) { continue }
+    try { $uso = ($pr.TotalProcessorTime.TotalMilliseconds - $antes[$pr.Id]) / (5000 * $nucleos) * 100 } catch { continue }
+    if ($uso -lt 25) { continue }
+    $ruta = ""; try { $ruta = $pr.Path } catch { }
+    $f = Get-Firma $ruta
+    $desdeWindows = $ruta -and $ruta.StartsWith($env:SystemRoot, [StringComparison]::OrdinalIgnoreCase) -and $f -and $f.Valida
+    if ($desdeWindows) { continue }
+    $usoTxt = [math]::Round($uso)
+    if (-not $f -or -not $f.Valida -or $ruta -match $rutaRara) {
+        Add-Sospecha "Alto" "Proceso" "$($pr.ProcessName) usa el $usoTxt % del procesador y no está firmado" "Un programa sin firma digital, o en una carpeta poco habitual, gastando tanto procesador es la señal más típica de un minero. Si no lo reconoces, termínalo y busca su nombre en Internet." $ruta $pr.Id
+    } else {
+        Add-Sospecha "Info" "Proceso" "$($pr.ProcessName) usa el $usoTxt % del procesador" "Está firmado por $($f.Firmante). Es normal si lo estás usando (juego, editor de vídeo, navegador con muchas pestañas). Si no lo estás usando y sigue alto, revísalo." $ruta $pr.Id
+    }
+}
+
+# 3. Programas ejecutándose desde carpetas raras y sin firma
+Write-Output "3/9 Revisando desde dónde se ejecuta cada programa..."
+$vistos = @{}
+foreach ($p in $procs) {
+    $ruta = [string]$p.ExecutablePath
+    if (-not $ruta -or $vistos.ContainsKey($ruta) -or $ruta -notmatch $rutaRara) { continue }
+    $vistos[$ruta] = $true
+    $f = Get-Firma $ruta
+    if ($f -and $f.Valida) { continue }
+    Add-Sospecha "Medio" "Proceso" "Programa sin firma ejecutándose desde una carpeta temporal o poco habitual: $($p.Name)" "Los programas normales se instalan en 'Archivos de programa'. Los que corren desde Temp, Public o la raíz de AppData/ProgramData y no tienen firma merecen una revisión." $ruta ([int]$p.ProcessId)
+}
+
+# 4. Conexiones a puertos típicos de grupos de minado
+Write-Output "4/9 Revisando las conexiones a Internet..."
+$puertosMinado = @(3333, 4444, 5555, 7777, 14433, 14444, 45560, 45700)
+try {
+    $con = @(Get-NetTCPConnection -State Established -ErrorAction Stop | Where-Object { $puertosMinado -contains [int]$_.RemotePort })
+    foreach ($c in $con) {
+        $pr = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
+        $ruta = ""; try { $ruta = $pr.Path } catch { }
+        Add-Sospecha "Medio" "Red" "$($pr.ProcessName) está conectado al puerto $($c.RemotePort) de $($c.RemoteAddress)" "Ese puerto es el que usan muchos grupos de minado (stratum). Algunos programas legítimos también lo usan; si no reconoces el programa, revísalo." $ruta ([int]$c.OwningProcess)
+    }
+} catch { Write-Warning "No se pudieron leer las conexiones de red." }
+
+# 5. Programas de arranque
+Write-Output "5/9 Revisando los programas que arrancan con Windows..."
+$claves = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+          "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run", "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+          "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"
+foreach ($k in $claves) {
+    $props = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue
+    if (-not $props) { continue }
+    foreach ($pp in $props.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' }) {
+        $cmd = [string]$pp.Value
+        $ruta = Get-RutaExe $cmd
+        if ($cmd -match $comandoRaro -or $cmd -match $comandoMinero) {
+            Add-Sospecha "Alto" "Arranque" "Entrada de arranque sospechosa: $($pp.Name)" "Al encender, ejecuta un comando oculto, codificado o que descarga algo de Internet: $cmd" $ruta
+        } elseif ($ruta -match $rutaRara) {
+            $f = Get-Firma $ruta
+            if (-not $f -or -not $f.Valida) {
+                Add-Sospecha "Medio" "Arranque" "Arranca con Windows un programa sin firma de una carpeta poco habitual: $($pp.Name)" "Comando: $cmd" $ruta
+            }
+        }
+    }
+}
+
+# 6. Tareas programadas
+Write-Output "6/9 Revisando las tareas programadas..."
+foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskPath -notlike "\Microsoft\*" })) {
+    foreach ($a in @($t.Actions)) {
+        if (-not $a.Execute) { continue }
+        $cmd = "$($a.Execute) $($a.Arguments)".Trim()
+        $ruta = Get-RutaExe $a.Execute
+        if ($cmd -match $comandoRaro -or $cmd -match $comandoMinero -or $ruta -match "(?i)($nombresMineros)") {
+            Add-Sospecha "Alto" "Tarea" "Tarea programada sospechosa: $($t.TaskPath)$($t.TaskName)" "Ejecuta un comando oculto, codificado, que descarga de Internet o de minado. Así es como muchos mineros vuelven aunque los borres. Comando: $($cmd.Substring(0, [Math]::Min(250, $cmd.Length)))" $ruta
+        } elseif ($ruta -match $rutaRara) {
+            $f = Get-Firma ([Environment]::ExpandEnvironmentVariables($ruta))
+            if (-not $f -or -not $f.Valida) {
+                Add-Sospecha "Medio" "Tarea" "Tarea programada que abre un programa sin firma: $($t.TaskName)" "Comando: $cmd" $ruta
+            }
+        }
+    }
+}
+
+# 7. Servicios
+Write-Output "7/9 Revisando los servicios..."
+foreach ($s in @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue)) {
+    $ruta = Get-RutaExe ([string]$s.PathName)
+    if (-not $ruta -or $ruta -match '(?i)\\Windows\\(System32|SysWOW64)\\') { continue }
+    if ($ruta -match "(?i)($nombresMineros)" -or [string]$s.PathName -match $comandoMinero) {
+        Add-Sospecha "Alto" "Servicio" "Servicio de minado: $($s.DisplayName)" "El servicio '$($s.Name)' ejecuta: $($s.PathName)" $ruta
+    } elseif ($ruta -match $rutaRara) {
+        $f = Get-Firma $ruta
+        if (-not $f -or -not $f.Valida) {
+            Add-Sospecha "Alto" "Servicio" "Servicio sin firma en una carpeta temporal o poco habitual: $($s.DisplayName)" "Los servicios se ejecutan con todos los permisos. Uno sin firma fuera de 'Archivos de programa' es muy sospechoso. Ejecuta: $($s.PathName)" $ruta
+        }
+    }
+}
+
+# 8. Exclusiones del antivirus y persistencia WMI
+Write-Output "8/9 Revisando exclusiones de Defender y tareas ocultas de WMI..."
+try {
+    $mp = Get-MpPreference -ErrorAction Stop
+    $exc = @(@($mp.ExclusionPath) + @($mp.ExclusionProcess) + @($mp.ExclusionExtension) | Where-Object { $_ })
+    if ($exc.Count) {
+        $niv = if (@($exc | Where-Object { $_ -match '(?i)^[A-Z]:\\?$|\\Users\\?$|\\AppData|\\Temp|\\ProgramData\\?$|^\.?exe$' }).Count) { "Alto" } else { "Medio" }
+        Add-Sospecha $niv "Exclusion" "Microsoft Defender tiene $($exc.Count) exclusión(es)" "Lo que está excluido no se analiza. Los mineros suelen añadir exclusiones para esconderse. Si no las pusiste tú (o tu antivirus o un programa que conoces), quítalas: $($exc -join '; ')"
+    }
+} catch { }
+foreach ($clase in "CommandLineEventConsumer", "ActiveScriptEventConsumer") {
+    foreach ($w in @(Get-CimInstance -Namespace root\subscription -ClassName $clase -ErrorAction SilentlyContinue)) {
+        $txt = if ($w.CommandLineTemplate) { $w.CommandLineTemplate } else { [string]$w.ScriptText }
+        Add-Sospecha "Alto" "WMI" "Tarea oculta de WMI: $($w.Name)" "WMI puede ejecutar comandos solos sin aparecer en el Programador de tareas; casi ningún programa normal lo usa así. Ejecuta: $($txt.Substring(0, [Math]::Min(250, $txt.Length)))"
+    }
+}
+
+# 9. Archivo hosts
+Write-Output "9/9 Revisando el archivo hosts..."
+$hosts = "$env:SystemRoot\System32\drivers\etc\hosts"
+$lineas = @(Get-Content -LiteralPath $hosts -ErrorAction SilentlyContinue | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith("#") })
+$bloqueos = @($lineas | Where-Object { $_ -match '(?i)(microsoft|windowsupdate|update\.microsoft|eset|kaspersky|avast|avg|bitdefender|norton|mcafee|malwarebytes|virustotal|sophos|trendmicro)' })
+if ($bloqueos.Count) {
+    Add-Sospecha "Alto" "Hosts" "El archivo hosts bloquea webs de seguridad o de Windows Update" "Así algunos malware impiden que el antivirus se actualice. Líneas: $($bloqueos -join ' | ')" $hosts
+} elseif ($lineas.Count) {
+    Add-Sospecha "Info" "Hosts" "El archivo hosts tiene $($lineas.Count) línea(s) propias" "Suele ser de programas de desarrollo o bloqueo de anuncios. Revísalo si no sabes de dónde salen." $hosts
+}
+
+$altos = @($lista | Where-Object { $_.Nivel -eq "Alto" }).Count
+$medios = @($lista | Where-Object { $_.Nivel -eq "Medio" }).Count
+Write-Output "Revisión terminada: $altos señal(es) importantes y $medios a revisar."
+'@
+
+$script:DetallesAcciones["Buscar mineros y programas sospechosos"] = "Es una revisión propia que NO usa el antivirus: busca las huellas que dejan los mineros y el malware común. Solo lee, no borra ni cambia nada. Tarda de 20 segundos a 2 minutos.`n`n1. Procesos con nombres o parámetros de minado (xmrig, nicehash, stratum+tcp, grupos de minado conocidos...).`n2. Qué procesos gastan mucho procesador durante 5 segundos y si están firmados.`n3. Programas sin firma ejecutándose desde Temp, Public o la raíz de AppData/ProgramData.`n4. Conexiones a los puertos que usan los grupos de minado.`n5. Programas de arranque con comandos ocultos, codificados o que descargan de Internet.`n6. Tareas programadas (fuera de las de Microsoft) con esos mismos trucos.`n7. Servicios sin firma fuera de 'Archivos de programa'.`n8. Exclusiones de Microsoft Defender y tareas ocultas de WMI.`n9. Archivo hosts que bloquee webs de antivirus o de Windows Update.`n`nCada resultado dice qué es, por qué es sospechoso y trae botones para abrir su carpeta, buscarlo en Internet o terminar el proceso. Que algo salga aquí no significa que sea un virus: es una pista para revisar."
+
+$pS = $script:UI.PanelSeguridad
+[void]$pS.Children.Add((New-Titulo "Revisión propia (sin antivirus)" "Busca mineros de criptomonedas y señales de malware por su cuenta, sin depender del antivirus instalado. No borra nada: te muestra lo sospechoso y tú decides."))
+New-TarjetaAccion -Panel $pS -Titulo "Buscar mineros y programas sospechosos" -TextoBoton "Revisar" -Riesgo "Bajo" `
+    -Descripcion "Procesos que gastan mucho procesador sin firma, nombres y conexiones de minado, arranque, tareas programadas, servicios, exclusiones del antivirus y archivo hosts." `
+    -Aviso "Puede tardar hasta 2 minutos. Mejor con los programas pesados cerrados, para que la medición del procesador sea fiable." `
+    -Accion {
+        $global:Estado.Revision = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+        $script:PanelRevision.Children.Clear()
+        Start-Pasos -Pasos @(New-PasoScript -Nombre "Buscar mineros y programas sospechosos" -Codigo $script:codigoRevision) -Silencioso
+        if ($script:Trabajo) { $script:AlTerminar = { Show-Revision } }
+    }
+$script:PanelRevision = New-Object System.Windows.Controls.StackPanel
+$script:PanelRevision.Margin = "0,0,0,8"
+[void]$pS.Children.Add($script:PanelRevision)
+
+$script:QueHacerRevision = @{
+    Proceso   = "Qué hacer: si no lo reconoces, pulsa 'Terminar proceso', abre su carpeta y busca el nombre en Internet. Después haz un análisis con Safety Scanner (arriba)."
+    Red       = "Qué hacer: mira qué programa es. Si no lo reconoces, termínalo y analiza el equipo."
+    Arranque  = "Qué hacer: desactívalo en Configuración > Aplicaciones > Inicio, o en el Administrador de tareas > Aplicaciones de arranque."
+    Tarea     = "Qué hacer: abre el Programador de tareas, búscala por su nombre, desactívala y luego elimínala si no la reconoces."
+    Servicio  = "Qué hacer: abre Servicios, búscalo, detenlo y ponlo en Deshabilitado si no lo reconoces. Luego analiza el equipo."
+    Exclusion = "Qué hacer: Seguridad de Windows > Protección antivirus > Administrar la configuración > Exclusiones, y quita las que no reconozcas."
+    WMI       = "Qué hacer: no es fácil de quitar a mano. Pasa Microsoft Safety Scanner (arriba) o pide ayuda técnica."
+    Hosts     = "Qué hacer: abre el archivo hosts con el Bloc de notas como administrador y borra las líneas que no reconozcas."
+}
+
+function Show-Revision {
+    $script:PanelRevision.Children.Clear()
+    $lista = @($global:Estado.Revision)
+    $altos = @($lista | Where-Object { $_.Nivel -eq "Alto" }).Count
+    $medios = @($lista | Where-Object { $_.Nivel -eq "Medio" }).Count
+    $res = New-Object System.Windows.Controls.TextBlock
+    $res.TextWrapping = "Wrap"
+    $res.FontWeight = "SemiBold"
+    $res.Margin = "16,0,0,8"
+    if ($lista.Count -eq 0 -or ($altos -eq 0 -and $medios -eq 0)) {
+        $res.Text = "$([char]0x2714) No se encontraron señales de mineros ni de programas sospechosos."
+        $res.Foreground = Get-Pincel "#16A34A"
+    } elseif ($altos) {
+        $res.Text = "$([char]0x2716) $altos señal(es) importantes y $medios a revisar. Revisa primero las rojas."
+        $res.Foreground = Get-Pincel "#DC2626"
+    } else {
+        $res.Text = "$([char]0x26A0) $medios cosa(s) a revisar. Probablemente sean programas legítimos, pero compruébalo."
+        $res.Foreground = Get-Pincel "#D97706"
+    }
+    [void]$script:PanelRevision.Children.Add($res)
+    $colores = @{ Alto = "#DC2626"; Medio = "#D97706"; Info = "#6B7280" }
+    foreach ($nivel in "Alto", "Medio", "Info") {
+        foreach ($h in @($lista | Where-Object { $_.Nivel -eq $nivel })) {
+            $marco = New-Object System.Windows.Controls.Border
+            $marco.Background = Get-Pincel "#FFFFFF"
+            $marco.BorderBrush = Get-Pincel $colores[$nivel]
+            $marco.BorderThickness = "4,1,1,1"
+            $marco.CornerRadius = 6
+            $marco.Padding = "12,8"
+            $marco.Margin = "16,0,0,6"
+            $pila = New-Object System.Windows.Controls.StackPanel
+            $tit = New-Object System.Windows.Controls.TextBlock
+            $tit.Text = $h.Titulo
+            $tit.FontWeight = "SemiBold"
+            $tit.TextWrapping = "Wrap"
+            [void]$pila.Children.Add($tit)
+            $det = New-Object System.Windows.Controls.TextBlock
+            $det.Text = $h.Detalle
+            $det.TextWrapping = "Wrap"
+            $det.Foreground = Get-Pincel "#4B5563"
+            $det.Margin = "0,2,0,0"
+            [void]$pila.Children.Add($det)
+            if ($nivel -ne "Info" -and $script:QueHacerRevision[$h.Tipo]) {
+                $que = New-Object System.Windows.Controls.TextBlock
+                $que.Text = $script:QueHacerRevision[$h.Tipo]
+                $que.TextWrapping = "Wrap"
+                $que.Foreground = Get-Pincel $colores[$nivel]
+                $que.Margin = "0,3,0,0"
+                [void]$pila.Children.Add($que)
+            }
+            if ($h.Ruta) {
+                $r = New-Object System.Windows.Controls.TextBlock
+                $r.Text = $h.Ruta
+                $r.TextWrapping = "Wrap"
+                $r.FontSize = 11
+                $r.Foreground = Get-Pincel "#9CA3AF"
+                $r.Margin = "0,2,0,0"
+                [void]$pila.Children.Add($r)
+            }
+            $botones = New-Object System.Windows.Controls.WrapPanel
+            $botones.Margin = "0,6,0,0"
+            $acciones = New-Object System.Collections.ArrayList
+            if ($h.Ruta -and (Test-Path -LiteralPath $h.Ruta)) {
+                [void]$acciones.Add(@("Abrir ubicación", [scriptblock]::Create("Start-Process explorer.exe -ArgumentList '/select,`"$($h.Ruta -replace "'", "''")`"'")))
+            }
+            $buscar = if ($h.Ruta) { Split-Path $h.Ruta -Leaf } else { $h.Titulo }
+            [void]$acciones.Add(@("Buscar en Internet", [scriptblock]::Create("Start-Process ('https://www.bing.com/search?q=' + [uri]::EscapeDataString('$($buscar -replace "'", "''")' + ' qué es'))")))
+            $abrir = @{ Tarea = "taskschd.msc"; Servicio = "services.msc"; Arranque = "ms-settings:startupapps"; Exclusion = "windowsdefender://threatsettings"; Hosts = "notepad.exe" }
+            if ($abrir[$h.Tipo]) {
+                $obj = $abrir[$h.Tipo]
+                $sb = if ($h.Tipo -eq "Hosts") { { Start-Process notepad.exe -ArgumentList "$env:SystemRoot\System32\drivers\etc\hosts" } } else { [scriptblock]::Create("Start-Process '$obj'") }
+                [void]$acciones.Add(@("Abrir donde se quita", $sb))
+            }
+            if ($h.Pid -and $nivel -ne "Info") {
+                [void]$acciones.Add(@("Terminar proceso", [scriptblock]::Create(@"
+if ([System.Windows.MessageBox]::Show("¿Terminar el proceso $($h.Pid)?``r``n``r``nSi es un programa legítimo, lo que no esté guardado se pierde. Si vuelve a aparecer, algo lo está relanzando (mira arranque, tareas y servicios).", "Terminar proceso", "YesNo", "Warning") -eq "Yes") {
+    try { Stop-Process -Id $($h.Pid) -Force -ErrorAction Stop; Escribir-Log "Proceso $($h.Pid) terminado." } catch { Escribir-Log "No se pudo terminar el proceso $($h.Pid): `$(`$_.Exception.Message)" "AVISO" }
+}
+"@)))
+            }
+            foreach ($a in $acciones) {
+                $b = New-Object System.Windows.Controls.Button
+                $b.Content = $a[0]
+                $b.Padding = "10,3"
+                $b.Margin = "0,0,6,0"
+                $b.Add_Click($a[1])
+                [void]$botones.Children.Add($b)
+            }
+            [void]$pila.Children.Add($botones)
+            $marco.Child = $pila
+            [void]$script:PanelRevision.Children.Add($marco)
+        }
+    }
+}
+
 $script:TemporizadorRam = New-Object System.Windows.Threading.DispatcherTimer
 $script:TemporizadorRam.Interval = [TimeSpan]::FromSeconds(3)
 $script:TemporizadorRam.Add_Tick({
