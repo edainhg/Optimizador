@@ -236,3 +236,187 @@ Describe "Aplicar y deshacer restaura el valor real" {
         Test-AjusteAplicado $script:Item | Should -BeFalse
     }
 }
+
+Describe "Mejoras: perfiles, privacidad, arranque, programas, limpieza, prioridad, discos, historial y tema" {
+    BeforeAll {
+        # Datos aislados (historial, respaldos, preferencias) para no tocar los del equipo
+        $env:LOCALAPPDATA = Join-Path $TestDrive "LocalAppDataMejoras"
+        New-Item -ItemType Directory -Force -Path $env:LOCALAPPDATA | Out-Null
+        . $script:Archivo -Prueba
+        $script:PatronGuid = '[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}'
+    }
+
+    It "Tiene las pestañas nuevas" {
+        foreach ($t in "TabPerfiles", "TabPrivacidad", "TabArranque", "TabProgramas", "TabHistorial") {
+            $script:Ventana.FindName($t) | Should -Not -BeNullOrEmpty -Because $t
+        }
+    }
+
+    It "Los scripts nuevos y el lanzador tienen sintaxis válida" {
+        $malos = @()
+        foreach ($v in "codigoEnergiaAlta", "codigoEnergiaVolver", "codigoVigilancia", "codigoVigilanciaDeshacer", "codigoListaArranque",
+                       "codigoBuscarActualizaciones", "codigoDesinstalar", "codigoBorrarRestos", "codigoLimpieza", "codigoDiscos") {
+            $c = Get-Variable -Name $v -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+            if (-not $c) { $malos += "$v (no existe)" } elseif ((Test-Sintaxis $c).Count) { $malos += $v }
+        }
+        $malos | Should -BeNullOrEmpty
+        (Test-Sintaxis (Get-Content -LiteralPath (Join-Path $script:Raiz "instalar.ps1") -Raw)).Count | Should -Be 0
+    }
+
+    It "Cada perfil usa ajustes que existen" {
+        foreach ($p in $script:PerfilesDef) {
+            foreach ($k in @(& $p.Claves)) { Get-ItemPorClave $k | Should -Not -BeNullOrEmpty -Because "$($p.Clave): $k" }
+        }
+        { Invoke-ComprobacionExtra "TabPerfiles" } | Should -Not -Throw
+        $script:TarjetasPerfil["Vigilancia"].Estado.Text | Should -Not -BeNullOrEmpty
+    }
+
+    It "El plan de energía Alto rendimiento se aplica y se deshace" {
+        $it = Get-ItemPorClave "OPT_ENERGIA_ALTA"
+        $antes = [regex]::Match((powercfg /getactivescheme | Out-String), $script:PatronGuid).Value
+        Invoke-Ajuste -Item $it -Deshacer $false | Should -BeTrue
+        Test-ItemAplicado $it | Should -BeTrue
+        Invoke-Ajuste -Item $it -Deshacer $true | Should -BeTrue
+        Test-ItemAplicado $it | Should -BeFalse
+        [regex]::Match((powercfg /getactivescheme | Out-String), $script:PatronGuid).Value | Should -Be $antes
+    }
+
+    It "El perfil de videovigilancia se aplica y se deshace" {
+        $it = Get-ItemVigilancia
+        (Test-Sintaxis (@($it.InvokeScript) -join "`n")).Count | Should -Be 0
+        Invoke-Ajuste -Item $it -Deshacer $false | Should -BeTrue
+        Test-ItemAplicado $it | Should -BeTrue
+        Invoke-Ajuste -Item $it -Deshacer $true | Should -BeTrue
+        Test-ItemAplicado $it | Should -BeFalse
+        Test-Path (Join-Path $env:LOCALAPPDATA "OptimizadorES\respaldo-vigilancia.json") | Should -BeFalse
+    }
+
+    It "Privacidad: aplica y deshace exacto" {
+        @($script:CasillasPriv).Count | Should -Be @($script:ItemsPrivacidad).Count
+        $it = Get-ItemPorClave "PRIV_IDIOMAS"
+        Invoke-Ajuste -Item $it -Deshacer $false | Should -BeTrue
+        Test-AjusteAplicado $it | Should -BeTrue
+        Invoke-Ajuste -Item $it -Deshacer $true | Should -BeTrue
+        Test-AjusteAplicado $it | Should -BeFalse
+        { Update-VistaPrivacidad } | Should -Not -Throw
+    }
+
+    It "Arranque: lista los programas y los desactiva/activa como el Administrador de tareas" {
+        $run = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+        $aprob = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+        New-ItemProperty -Path $run -Name "OptESPrueba" -Value "`"$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile" -PropertyType String -Force | Out-Null
+        try {
+            $global:Estado.Arranque = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+            & ([scriptblock]::Create($script:codigoListaArranque)) | Out-Null
+            $e = @($global:Estado.Arranque | Where-Object { $_.Nombre -eq "OptESPrueba" })[0]
+            $e | Should -Not -BeNullOrEmpty
+            $e.Activo | Should -BeTrue
+            $e.Firma | Should -BeIn @("Valida", "SinFirma", "NoValida")
+            { Show-Arranque } | Should -Not -Throw
+            Set-EntradaArranque $e $false | Should -BeTrue
+            (Get-ItemProperty -Path $aprob -Name OptESPrueba).OptESPrueba[0] | Should -Be 3
+            Set-EntradaArranque $e $true | Should -BeTrue
+            (Get-ItemProperty -Path $aprob -Name OptESPrueba).OptESPrueba[0] | Should -Be 2
+            @(Read-Historial | Where-Object { $_.Tipo -eq "Arranque" }).Count | Should -Be 2
+        } finally {
+            Remove-ItemProperty -Path $run -Name OptESPrueba -ErrorAction SilentlyContinue
+            Remove-ItemProperty -Path $aprob -Name OptESPrueba -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "Lee la tabla de winget en español y en inglés" {
+        $f = "{0,-23}{1,-25}{2,-13}{3,-13}{4}"
+        $es = @(
+            ($f -f "Nombre", "Id", "Versión", "Disponible", "Origen"),
+            ("-" * 80),
+            ($f -f "Google Chrome", "Google.Chrome", "120.0.1", "121.0.2", "winget"),
+            ($f -f "7-Zip 23.01 (x64)", "7zip.7zip", "23.01", "24.08", "winget"),
+            ($f -f "Programa muy largo…", "Vendor.Muy.Larg…", "1.0", "2.0", "winget"),
+            "2 actualizaciones disponibles."
+        ) -join "`r`n"
+        $r = ConvertFrom-TablaWinget -Texto $es
+        $r.Count | Should -Be 2
+        $r[0].Id | Should -Be "Google.Chrome"
+        $r[1].Disponible | Should -Be "24.08"
+        $en = "`r   -`r   \`r" + (@(
+            ($f -f "Name", "Id", "Version", "Available", "Source"),
+            ("-" * 80),
+            ($f -f "Notepad++", "Notepad++.Notepad++", "8.5", "8.6.2", "winget")
+        ) -join "`n")
+        $r2 = ConvertFrom-TablaWinget -Texto $en
+        $r2.Count | Should -Be 1
+        $r2[0].Id | Should -Be "Notepad++.Notepad++"
+        @(ConvertFrom-TablaWinget -Texto "No se encontró ninguna actualización disponible.").Count | Should -Be 0
+    }
+
+    It "Muestra los programas con actualización con su casilla" {
+        $global:Estado.Actualizables = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+        [void]$global:Estado.Actualizables.Add(@{ Id = "Google.Chrome"; Nombre = "Google Chrome"; Version = "1"; Disponible = "2"; Origen = "winget" })
+        { Show-Actualizables } | Should -Not -Throw
+        @($script:CasillasActualizables).Count | Should -Be 1
+    }
+
+    It "Encuentra restos de un programa y no confunde carpetas del sistema" {
+        $carpeta = Join-Path $env:LOCALAPPDATA "OptES Prueba App"
+        New-Item -ItemType Directory -Force -Path $carpeta | Out-Null
+        Set-Content -LiteralPath (Join-Path $carpeta "a.txt") -Value "x"
+        New-Item -Path "HKCU:\Software\OptES Prueba App" -Force | Out-Null
+        try {
+            $r = Find-Restos -Nombre "OptES Prueba App 1.2.3 (x64)" -Editor "OptES Corp, Inc."
+            @($r | Where-Object { $_.Ruta -eq $carpeta }).Count | Should -Be 1
+            @($r | Where-Object { $_.Tipo -eq "Registro" }).Count | Should -Be 1
+            @(Find-Restos -Nombre "Microsoft").Count | Should -Be 0
+            @(Find-Restos -Nombre "Intel 1.0").Count | Should -Be 0
+        } finally { Remove-Item -Path "HKCU:\Software\OptES Prueba App" -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It "Lista los programas instalados" {
+        @(Get-ProgramasInstalados).Count | Should -BeGreaterThan 0
+        { Show-Instalados } | Should -Not -Throw
+        $script:PanelInstalados.Children.Count | Should -BeGreaterThan 1
+    }
+
+    It "Mide el espacio que se puede limpiar" {
+        $global:Estado.Limpieza = [hashtable]::Synchronized(@{})
+        $codigo = "`$Modo = 'Medir'`n`$Claves = @('TempUsuario', 'Registros', 'Papelera', 'Componentes')`n" + $script:codigoLimpieza
+        & ([scriptblock]::Create($codigo)) | Out-Null
+        $global:Estado.Limpieza.ContainsKey("TempUsuario") | Should -BeTrue
+        $global:Estado.Limpieza["Componentes"] | Should -Be -1
+        { Show-Limpieza } | Should -Not -Throw
+        $script:TxtTotalLimpieza.Text | Should -Match "GB"
+    }
+
+    It "Revisa la salud de los discos" {
+        $global:Estado.Discos = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+        $global:Estado.Bateria = $null
+        $global:Estado.AvisoSmart = $false
+        & ([scriptblock]::Create($script:codigoDiscos)) | Out-Null
+        { Show-SaludDiscos } | Should -Not -Throw
+        $script:PanelDiscos.Children.Count | Should -BeGreaterThan 0
+    }
+
+    It "Añade y quita una regla de prioridad" {
+        Set-ReglaPrioridad "optesprueba.exe" 6
+        (Get-ReglasPrioridad | Where-Object Exe -eq "optesprueba.exe").Valor | Should -Be 6
+        { Show-ReglasPrioridad } | Should -Not -Throw
+        Remove-ReglaPrioridad "optesprueba.exe"
+        @(Get-ReglasPrioridad | Where-Object Exe -eq "optesprueba.exe").Count | Should -Be 0
+        Test-Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\optesprueba.exe" | Should -BeFalse
+        { Set-ReglaPrioridad "mal\nombre" 3 } | Should -Throw
+    }
+
+    It "El historial muestra los cambios" {
+        @(Read-Historial).Count | Should -BeGreaterThan 0
+        { Show-Historial } | Should -Not -Throw
+        $script:PanelHistorial.Children.Count | Should -BeGreaterThan 1
+    }
+
+    It "El modo oscuro cambia los colores y la ventana carga igual" {
+        $oscuro = Convert-ColoresOscuro $xaml
+        $oscuro | Should -Not -Match '"#FFFFFF"'
+        $oscuro | Should -Match '#1E293B'
+        $v = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader ([xml]$oscuro)))
+        $v | Should -Not -BeNullOrEmpty
+        $v.Close()
+    }
+}

@@ -340,6 +340,9 @@ function Invoke-Ajuste {
         }
     }
 
+    if ($ok -and $Item.Grupo -and $Item.Key -ne "WPFTweaksRestorePoint") {
+        Add-Historial -Tipo "Ajuste" -Clave ([string]$Item.Key) -Nombre ([string]$Item.Nombre) -Accion $(if ($Deshacer) { "Deshecho" } else { "Aplicado" })
+    }
     if ($ok -and $global:avisos) { Escribir-Log "Listo con avisos: $($Item.Nombre) (revisa las líneas AVISO de arriba)" "AVISO" }
     elseif ($ok) { Escribir-Log "Listo: $($Item.Nombre)" } else { Escribir-Log "Terminado con errores: $($Item.Nombre)" "ERROR" }
     return $ok
@@ -506,6 +509,126 @@ function Get-EstadoToggle {
     }
     return $true
 }
+
+# ----- Historial de cambios (una línea JSON por cambio, en %LOCALAPPDATA%\OptimizadorES\historial.jsonl)
+function Get-RutaHistorial { return (Join-Path $env:LOCALAPPDATA "OptimizadorES\historial.jsonl") }
+
+function Add-Historial {
+    param([string]$Tipo, [string]$Clave, [string]$Nombre, [string]$Accion, $Datos = $null)
+    try {
+        $ruta = Get-RutaHistorial
+        New-Item -ItemType Directory -Force -Path (Split-Path $ruta) | Out-Null
+        $linea = [ordered]@{ Fecha = (Get-Date).ToString("s"); Tipo = $Tipo; Clave = $Clave; Nombre = $Nombre; Accion = $Accion; Datos = $Datos } | ConvertTo-Json -Compress -Depth 6
+        Add-Content -LiteralPath $ruta -Value $linea -Encoding UTF8
+    } catch { }
+}
+
+# ----- Lee la tabla que escribe 'winget upgrade' (en español o en inglés)
+function ConvertFrom-TablaWinget {
+    param([string]$Texto)
+    $resultado = New-Object System.Collections.ArrayList
+    # winget dibuja una ruedita con retornos de carro: se queda lo que hay después del último
+    $lineas = @(($Texto -replace "`r`n", "`n") -split "`n" | ForEach-Object {
+        $l = $_; $i = $l.LastIndexOf([char]13)
+        if ($i -ge 0) { $l = $l.Substring($i + 1) }
+        $l.TrimEnd()
+    })
+    $sep = -1
+    for ($i = 1; $i -lt $lineas.Count; $i++) { if ($lineas[$i] -match '^-{10,}$') { $sep = $i; break } }
+    if ($sep -lt 1) { return ,$resultado }
+    $cab = $lineas[$sep - 1]
+    $cols = @([regex]::Matches($cab, '\S+') | ForEach-Object { $_.Index })
+    if ($cols.Count -lt 4) { return ,$resultado }
+    for ($i = $sep + 1; $i -lt $lineas.Count; $i++) {
+        $l = $lineas[$i]
+        if (-not $l.Trim()) { break }
+        if ($l.Length -le $cols[3]) { continue }
+        $campos = for ($n = 0; $n -lt $cols.Count; $n++) {
+            $ini = $cols[$n]
+            $fin = if ($n + 1 -lt $cols.Count) { [Math]::Min($cols[$n + 1], $l.Length) } else { $l.Length }
+            if ($ini -ge $l.Length -or $fin -le $ini) { "" } else { $l.Substring($ini, $fin - $ini).Trim() }
+        }
+        $campos = @($campos)
+        $id = $campos[1]
+        $origen = if ($campos.Count -ge 5) { $campos[4] } else { "winget" }
+        # Se descartan el pie ("3 actualizaciones disponibles") y los Id recortados con "…"
+        if ($id -notmatch '^[\w.+-]+$' -or $campos[3] -notmatch '\d' -or $origen -notmatch '^(winget|msstore)$') { continue }
+        [void]$resultado.Add(@{ Id = $id; Nombre = $campos[0]; Version = $campos[2]; Disponible = $campos[3]; Origen = $origen })
+    }
+    return ,$resultado
+}
+
+# ----- Busca restos de un programa desinstalado (carpetas, accesos directos y claves del registro)
+function Find-Restos {
+    param([string]$Nombre, [string]$Editor = "", [string]$Ubicacion = "")
+    $hallados = New-Object System.Collections.ArrayList
+    $vistos = @{}
+    $prohibidos = '^(Microsoft|Windows|Microsoft Corporation|Common Files|Intel|AMD|NVIDIA|Google|Mozilla|Adobe|Programs|Packages|Temp|WindowsApps|Realtek|Package Cache|Installer|Java|Oracle|Apple|Classes|Policies|Wow6432Node|Software|System|Program Files|ProgramData|AppData|Users|Default|Public|Drivers|Hewlett-Packard|HP|Dell|Lenovo|ASUS|Acer|Steam|Epic Games|Origin|Ubisoft|Program|Data|Tools|Update|Updater|Setup|Uninstall|Client|Server|Service|Services|Application|Applications|Launcher)$'
+    $base = $Nombre -replace '\s*\([^)]*\)', ' ' -replace '(?i)\s+(x64|x86|64-bit|32-bit|64 bits|32 bits)\b', ' ' -replace '\s+v?\d+([.,]\d+)+.*$', '' -replace '\s+', ' '
+    $base = $base.Trim(" -_.".ToCharArray())
+    $candidatos = @(@($base, $Nombre.Trim()) | Where-Object { $_ -and $_.Length -ge 4 -and $_ -notmatch $prohibidos -and $_ -notmatch '[\\/:*?"<>|]' } | Select-Object -Unique)
+    $editores = @()
+    if ($Editor) {
+        $ed = ($Editor -replace '(?i)[,.]?\s+(Inc|LLC|Ltd|Limited|GmbH|Corporation|Corp|Co|S\.?A|S\.?L|Software|Technologies|Technology)\.?$', '').Trim(" ,.".ToCharArray())
+        $editores = @(@($Editor.Trim(), $ed) | Where-Object { $_ -and $_.Length -ge 3 -and $_ -notmatch '[\\/:*?"<>|]' } | Select-Object -Unique)
+    }
+    if (-not $candidatos.Count) { return ,$hallados }
+
+    function Add-Resto([string]$Tipo, [string]$Ruta) {
+        if ($vistos.ContainsKey($Ruta)) { return }
+        $vistos[$Ruta] = $true
+        $mb = 0
+        if ($Tipo -eq "Carpeta") {
+            try { $mb = [math]::Round((Get-ChildItem -LiteralPath $Ruta -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum / 1MB, 1) } catch { }
+        }
+        [void]$hallados.Add(@{ Tipo = $Tipo; Ruta = $Ruta; MB = $mb })
+    }
+
+    $raices = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData, $env:APPDATA, $env:LOCALAPPDATA, (Join-Path $env:LOCALAPPDATA "Programs")) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
+    foreach ($r in $raices) {
+        foreach ($c in $candidatos) {
+            $p = Join-Path $r $c
+            if (Test-Path -LiteralPath $p -PathType Container) { Add-Resto "Carpeta" $p }
+            foreach ($e in $editores) {
+                $p2 = Join-Path (Join-Path $r $e) $c
+                if (Test-Path -LiteralPath $p2 -PathType Container) { Add-Resto "Carpeta" $p2 }
+            }
+        }
+    }
+    # Carpeta de instalación, solo si está dentro de una carpeta de programas y no es la raíz
+    if ($Ubicacion) {
+        $u = $Ubicacion.Trim().Trim('"').TrimEnd('\')
+        $dentro = @($raices | Where-Object { $u -like "$_\*" }).Count -gt 0
+        if ($dentro -and ($raices -notcontains $u) -and (Split-Path $u -Leaf) -notmatch $prohibidos -and (Test-Path -LiteralPath $u -PathType Container)) { Add-Resto "Carpeta" $u }
+    }
+    # Accesos directos del menú Inicio y del Escritorio
+    $menus = @([Environment]::GetFolderPath("Programs"), [Environment]::GetFolderPath("CommonPrograms"))
+    $escritorios = @([Environment]::GetFolderPath("Desktop"), [Environment]::GetFolderPath("CommonDesktopDirectory"))
+    foreach ($c in $candidatos) {
+        foreach ($m in $menus) {
+            if (-not $m) { continue }
+            $p = Join-Path $m $c
+            if (Test-Path -LiteralPath $p -PathType Container) { Add-Resto "Carpeta" $p }
+            if (Test-Path -LiteralPath "$p.lnk") { Add-Resto "Acceso" "$p.lnk" }
+        }
+        foreach ($d in $escritorios) {
+            if ($d -and (Test-Path -LiteralPath (Join-Path $d "$c.lnk"))) { Add-Resto "Acceso" (Join-Path $d "$c.lnk") }
+        }
+    }
+    # Claves del registro
+    $raicesReg = "HKCU:\Software", "HKLM:\SOFTWARE", "HKLM:\SOFTWARE\WOW6432Node"
+    foreach ($rr in $raicesReg) {
+        foreach ($c in $candidatos) {
+            $k = "$rr\$c"
+            if (Test-Path -LiteralPath $k) { Add-Resto "Registro" $k }
+            foreach ($e in $editores) {
+                $k2 = "$rr\$e\$c"
+                if (Test-Path -LiteralPath $k2) { Add-Resto "Registro" $k2 }
+            }
+        }
+    }
+    return ,$hallados
+}
 '@
 
 . ([scriptblock]::Create($script:MotorCodigo))
@@ -516,7 +639,7 @@ $xaml = @'
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Optimizador de Windows (en español)" Width="1180" Height="800"
         MinWidth="900" MinHeight="580" WindowStartupLocation="CenterScreen"
-        Background="#EEF1F5" FontFamily="Segoe UI" FontSize="13">
+        Background="#EEF1F5" Foreground="#1F2937" FontFamily="Segoe UI" FontSize="13">
   <Window.Resources>
     <Style TargetType="Button">
       <Setter Property="Background" Value="#FFFFFF"/>
@@ -556,7 +679,18 @@ $xaml = @'
     </Style>
     <Style TargetType="TextBox">
       <Setter Property="BorderBrush" Value="#D1D5DB"/>
+      <Setter Property="Background" Value="#FFFFFF"/>
+      <Setter Property="Foreground" Value="#1F2937"/>
       <Setter Property="Padding" Value="6,4"/>
+    </Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="#1F2937"/>
+    </Style>
+    <Style TargetType="Expander">
+      <Setter Property="Foreground" Value="#1F2937"/>
+    </Style>
+    <Style TargetType="ComboBox">
+      <Setter Property="Foreground" Value="Black"/>
     </Style>
     <Style TargetType="TabItem">
       <Setter Property="Cursor" Value="Hand"/>
@@ -604,6 +738,7 @@ $xaml = @'
       </Setter>
     </Style>
     <Style TargetType="TabControl">
+      <Setter Property="Foreground" Value="#1F2937"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="TabControl">
@@ -643,11 +778,13 @@ $xaml = @'
       </Border.Background>
       <DockPanel>
         <Image x:Name="ImgLogo" DockPanel.Dock="Left" Width="44" Height="44" Margin="0,0,14,0" VerticalAlignment="Center"/>
-        <TextBlock x:Name="TxtEquipo" DockPanel.Dock="Right" Foreground="#DBEAFE" FontSize="12" TextAlignment="Right"
+        <Button x:Name="BtnTema" DockPanel.Dock="Right" Content="Modo oscuro" Margin="14,0,0,0" Padding="10,5" VerticalAlignment="Center"
+                Background="#22FFFFFF" Foreground="White" BorderBrush="#66FFFFFF" ToolTip="Cambia entre modo claro y oscuro (el optimizador se vuelve a abrir)"/>
+        <TextBlock x:Name="TxtEquipo" DockPanel.Dock="Right" Foreground="#DCEBFE" FontSize="12" TextAlignment="Right"
                    VerticalAlignment="Center" Margin="16,0,0,0"/>
         <StackPanel VerticalAlignment="Center">
           <TextBlock Text="Optimizador de Windows" FontSize="22" FontWeight="SemiBold" Foreground="White"/>
-          <TextBlock TextWrapping="Wrap" Foreground="#DBEAFE" Margin="0,2,0,0"
+          <TextBlock TextWrapping="Wrap" Foreground="#DCEBFE" Margin="0,2,0,0"
                      Text="Analiza, limpia y ajusta Windows. Cada opción indica su nivel de riesgo y antes de cambiar nada se crea un punto de restauración."/>
         </StackPanel>
       </DockPanel>
@@ -660,6 +797,11 @@ $xaml = @'
         </ScrollViewer>
       </TabItem>
       <TabItem Header="OPTIMIZAR" Style="{StaticResource Grupo}"/>
+      <TabItem x:Name="TabPerfiles" Header="Perfiles de un clic" Tag="&#xE734;">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelPerfiles" Margin="14"/>
+        </ScrollViewer>
+      </TabItem>
       <TabItem x:Name="TabAjustes" Header="Ajustes" Tag="&#xE713;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel x:Name="PanelAjustes" Margin="12"/>
@@ -674,9 +816,19 @@ $xaml = @'
           </StackPanel>
         </ScrollViewer>
       </TabItem>
-      <TabItem x:Name="TabRendimiento" Header="RAM y disco" Tag="&#xE9D9;">
+      <TabItem x:Name="TabRendimiento" Header="Rendimiento y disco" Tag="&#xE9D9;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel x:Name="PanelRendimiento" Margin="14"/>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem x:Name="TabPrivacidad" Header="Privacidad" Tag="&#xE72E;">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelPrivacidad" Margin="14"/>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem x:Name="TabArranque" Header="Arranque de Windows" Tag="&#xE7E8;">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelArranque" Margin="14"/>
         </ScrollViewer>
       </TabItem>
       <TabItem Header="PROGRAMAS Y CONTROLADORES" Style="{StaticResource Grupo}"/>
@@ -699,6 +851,11 @@ $xaml = @'
             <StackPanel x:Name="PanelApps" Margin="12,0,12,12"/>
           </ScrollViewer>
         </DockPanel>
+      </TabItem>
+      <TabItem x:Name="TabProgramas" Header="Mis programas" Tag="&#xE8F1;">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelProgramas" Margin="14"/>
+        </ScrollViewer>
       </TabItem>
       <TabItem x:Name="TabControladores" Header="Controladores" Tag="&#xE950;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
@@ -727,6 +884,11 @@ $xaml = @'
           <StackPanel x:Name="PanelConfig" Margin="12"/>
         </ScrollViewer>
       </TabItem>
+      <TabItem x:Name="TabHistorial" Header="Historial de cambios" Tag="&#xE81C;">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelHistorial" Margin="14"/>
+        </ScrollViewer>
+      </TabItem>
       <TabItem x:Name="TabAyuda" Header="Riesgos y ayuda" Tag="&#xE897;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel x:Name="PanelAyuda" Margin="16"/>
@@ -746,8 +908,8 @@ $xaml = @'
         <Button x:Name="BtnLimpiar" Content="Quitar selección" Padding="12,6" Margin="0,0,8,4"/>
         <Button x:Name="BtnDeshacer" Content="Deshacer seleccionados" Padding="12,6" Margin="0,0,8,4"/>
         <Button x:Name="BtnRestaurar" Content="Abrir Restaurar sistema" Padding="12,6" Margin="0,0,8,4"/>
-        <Button x:Name="BtnExportar" Content="Exportar selección" Padding="12,6" Margin="0,0,8,4"/>
-        <Button x:Name="BtnImportar" Content="Importar selección" Padding="12,6" Margin="0,0,8,4"/>
+        <Button x:Name="BtnExportar" Content="Exportar configuración" Padding="12,6" Margin="0,0,8,4"/>
+        <Button x:Name="BtnImportar" Content="Importar configuración" Padding="12,6" Margin="0,0,8,4"/>
       </WrapPanel>
       <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
         <Button x:Name="BtnPreferencias" Content="Aplicar preferencias" Padding="14,6" Margin="0,0,8,4" Style="{StaticResource Primario}"/>
@@ -764,20 +926,55 @@ $xaml = @'
         <TextBlock x:Name="TxtEstado" DockPanel.Dock="Left" Foreground="#374151" Text="Listo."/>
         <ProgressBar x:Name="Barra" Height="8" Margin="12,0,0,0" Minimum="0" Maximum="100" Value="0"/>
       </DockPanel>
-      <Border Grid.Row="1" CornerRadius="8" Background="#111827" Padding="2">
+      <Border Grid.Row="1" CornerRadius="8" Background="#0B1120" Padding="2">
         <TextBox x:Name="TxtLog" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
-                 Background="#111827" Foreground="#E5E7EB" BorderThickness="0" Padding="8"/>
+                 Background="#0B1120" Foreground="#E5E7EC" BorderThickness="0" Padding="8"/>
       </Border>
     </Grid>
   </Grid>
 </Window>
 '@
 
+# ---------------------------------------------------------------- Preferencias del optimizador (tema y pestaña al abrir)
+$script:RutaPrefs = Join-Path $env:LOCALAPPDATA "OptimizadorES\preferencias.json"
+$script:Prefs = @{ Tema = "Claro"; RecordarPestana = $false; UltimaPestana = ""; AbrirEn = "" }
+if (-not $Prueba -and (Test-Path -LiteralPath $script:RutaPrefs)) {
+    try {
+        $prefsLeidas = Get-Content -LiteralPath $script:RutaPrefs -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($pr in $prefsLeidas.PSObject.Properties) { $script:Prefs[$pr.Name] = $pr.Value }
+    } catch { }
+}
+function Save-Prefs {
+    try {
+        New-Item -ItemType Directory -Force -Path (Split-Path $script:RutaPrefs) | Out-Null
+        $script:Prefs | ConvertTo-Json | Set-Content -LiteralPath $script:RutaPrefs -Encoding UTF8
+    } catch { }
+}
+$script:Oscuro = ([string]$script:Prefs.Tema -eq "Oscuro")
+# Modo oscuro: cada color claro de la interfaz se cambia por su equivalente oscuro
+$script:MapaOscuro = @{
+    "#FFFFFF" = "#1E293B"; "#F7F8FA" = "#0F172A"; "#EEF1F5" = "#0B1220"; "#E2E6EC" = "#334155"; "#E5E7EB" = "#334155"
+    "#D1D5DB" = "#475569"; "#F3F4F6" = "#0F172A"; "#EEF2F7" = "#24324A"; "#E3ECFD" = "#1E3A8A"
+    "#111827" = "#F1F5F9"; "#1F2937" = "#E2E8F0"; "#374151" = "#CBD5E1"; "#4B5563" = "#B6C2D1"; "#6B7280" = "#94A3B8"; "#9CA3AF" = "#64748B"
+    "#2563EB" = "#3B82F6"; "#1D4ED8" = "#93C5FD"; "#DBEAFE" = "#1E3A8A"
+    "#E7F6EC" = "#14532D"; "#1E7B3A" = "#86EFAC"; "#FFF4E0" = "#4A3410"; "#A85F00" = "#FBBF24"; "#FDE8E8" = "#4C1D1D"; "#B42318" = "#FCA5A5"
+    "#FFFBEB" = "#3A2A0A"; "#FEF2F2" = "#3B1414"; "#16A34A" = "#22C55E"; "#DC2626" = "#EF4444"; "#D97706" = "#F59E0B"
+    "#86EFAC" = "#166534"; "#93C5FD" = "#1E40AF"; "#FCA5A5" = "#7F1D1D"
+}
+function Convert-ColoresOscuro([string]$Texto) {
+    return [regex]::Replace($Texto, '#[0-9A-Fa-f]{6}\b', [System.Text.RegularExpressions.MatchEvaluator]{
+        param($m)
+        $c = $script:MapaOscuro[$m.Value]
+        if ($c) { return $c } else { return $m.Value }
+    })
+}
+if ($script:Oscuro) { $xaml = Convert-ColoresOscuro $xaml }
+
 $lector = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
 $script:Ventana = [Windows.Markup.XamlReader]::Load($lector)
 $ui = @{}
-foreach ($n in "PanelAjustes","PanelPreferencias","PanelAyuda","PanelSeguridad","PanelApps","TxtBuscarApp","BtnAppsInstalar","BtnAppsActualizar","BtnAppsDesinstalar","BtnAppsTodo","BtnAppsLimpiar","BtnAppsComprobar","BtnAppsActualizables","BtnAppsPanel","TxtWinget","PanelReparaciones","PanelInforme","PanelConfig","BtnPresetEstandar","BtnPresetMinimo","BtnExportar","BtnImportar","BtnRecomendados","BtnLimpiar","BtnDeshacer","BtnRestaurar","BtnPreferencias","BtnAplicar","TxtEstado","Barra","TxtLog","Pestanas","ImgLogo","PanelInicio","PanelRendimiento","TxtEquipo","PanelControladores") {
+foreach ($n in "PanelAjustes","PanelPreferencias","PanelAyuda","PanelSeguridad","PanelApps","TxtBuscarApp","BtnAppsInstalar","BtnAppsActualizar","BtnAppsDesinstalar","BtnAppsTodo","BtnAppsLimpiar","BtnAppsComprobar","BtnAppsActualizables","BtnAppsPanel","TxtWinget","PanelReparaciones","PanelInforme","PanelConfig","BtnPresetEstandar","BtnPresetMinimo","BtnExportar","BtnImportar","BtnRecomendados","BtnLimpiar","BtnDeshacer","BtnRestaurar","BtnPreferencias","BtnAplicar","TxtEstado","Barra","TxtLog","Pestanas","ImgLogo","PanelInicio","PanelRendimiento","TxtEquipo","PanelControladores","PanelPerfiles","PanelPrivacidad","PanelArranque","PanelProgramas","PanelHistorial","BtnTema") {
     $ui[$n] = $script:Ventana.FindName($n)
 }
 $script:UI = $ui
@@ -793,7 +990,10 @@ $script:Colores = @{
     Alto  = @{ Fondo = "#FDE8E8"; Texto = "#B42318"; Etiqueta = "Riesgo ALTO" }
 }
 $conversor = New-Object System.Windows.Media.BrushConverter
-function Get-Pincel([string]$hex) { return $conversor.ConvertFromString($hex) }
+function Get-Pincel([string]$hex) {
+    if ($script:Oscuro) { $hexOscuro = $script:MapaOscuro[$hex]; if ($hexOscuro) { $hex = $hexOscuro } }
+    return $conversor.ConvertFromString($hex)
+}
 
 # ---------------------------------------------------------------- Detalles: qué hace cada opción
 # Resumen corto siempre visible; el detalle completo se abre con "Ver detalles".
@@ -1045,7 +1245,8 @@ $textosAyuda = @(
     @("Riesgo medio", "Pueden desactivar alguna función que quizá uses (ubicación, notificaciones, búsqueda rápida, Xbox, compartir Internet...). Lee el aviso."),
     @("Riesgo ALTO", "Desinstalan componentes, quitan protección (cifrado, avisos de seguridad) o pueden romper la red o programas. Algunos no se pueden deshacer del todo."),
     @("Cómo volver atrás", "1) Marca el ajuste y pulsa 'Deshacer seleccionados'. 2) Si algo va mal, usa 'Abrir Restaurar sistema' y elige el punto 'OptimizadorES'. Las desinstalaciones (Edge, OneDrive, IA) no se revierten con 'Deshacer': hay que reinstalar."),
-    @("Registro", "Todo lo que hace la herramienta se guarda en: " + $global:ArchivoLog),
+    @("Registro", "Todo lo que hace la herramienta se guarda en: " + $global:ArchivoLog + ". La lista de cambios con su botón de deshacer está en la pestaña Historial de cambios."),
+    @("Abrir siempre la última versión", "En PowerShell escribe: irm https://raw.githubusercontent.com/edainhg/Optimizador/main/instalar.ps1 | iex  (descarga el optimizador de GitHub y lo abre como administrador)."),
     @("Créditos", "Ajustes técnicos basados en WinUtil de Chris Titus Tech (github.com/ChrisTitusTech/winutil), licencia MIT. Traducción, niveles de riesgo e interfaz: OptimizadorES. Se usa bajo tu responsabilidad, sin garantía.")
 )
 foreach ($par in $textosAyuda) {
@@ -1780,6 +1981,7 @@ function Invoke-ComprobacionPestana {
     if ($sel -eq "TabApps" -and -not $script:AppsComprobadas) { Start-ComprobarApps }
     if ($sel -eq "TabConfig" -and -not $script:FeaturesComprobadas) { Start-ComprobarFeatures }
     if ($sel -eq "TabInicio" -or $sel -eq "TabRendimiento") { Update-IndicadorRam }
+    if (Get-Command Invoke-ComprobacionExtra -ErrorAction SilentlyContinue) { Invoke-ComprobacionExtra $sel }
 }
 $script:UI.Pestanas.Add_SelectionChanged({
     param($origen, $evento)
@@ -1936,15 +2138,18 @@ $ui.BtnExportar.Add_Click({
         Ajustes      = @($script:CasillasAjustes | Where-Object { $_.IsChecked } | ForEach-Object { $_.Tag.Key })
         Preferencias = @{}
         Apps         = @($script:TarjetasApps | Where-Object { $_.Casilla.IsChecked } | ForEach-Object { $_.App.Id })
+        Privacidad   = @($script:CasillasPriv | Where-Object { $_.IsChecked } | ForEach-Object { $_.Tag.Key })
+        Prioridades  = @(Get-ReglasPrioridad | ForEach-Object { @{ Exe = $_.Exe; Valor = $_.Valor } })
+        Tema         = [string]$script:Prefs.Tema
     }
     foreach ($c in $script:CasillasPref) { $datos.Preferencias[$c.Tag.Key] = [bool]$c.IsChecked }
     $dlg = New-Object Microsoft.Win32.SaveFileDialog
     $dlg.Filter = "Selección del optimizador (*.json)|*.json"
-    $dlg.FileName = "seleccion-optimizador.json"
+    $dlg.FileName = "configuracion-optimizador.json"
     if ($dlg.ShowDialog()) {
         $datos | ConvertTo-Json -Depth 4 | Set-Content -Path $dlg.FileName -Encoding UTF8
         Escribir-Log "Selección guardada en $($dlg.FileName)"
-        [void][System.Windows.MessageBox]::Show("Selección guardada. Usa 'Importar selección' en otro equipo para marcar lo mismo.", "Exportar", "OK", "Information")
+        [void][System.Windows.MessageBox]::Show("Configuración guardada. Usa 'Importar' en otro equipo para marcar lo mismo y copiar tus reglas de prioridad.", "Exportar", "OK", "Information")
     }
 })
 
@@ -1960,8 +2165,14 @@ $ui.BtnImportar.Add_Click({
             $v = $datos.Preferencias.($c.Tag.Key)
             if ($null -ne $v) { $c.IsChecked = [bool]$v }
         }
+        foreach ($c in $script:CasillasPriv) { $c.IsChecked = (@($datos.Privacidad) -contains $c.Tag.Key) -and -not $script:InfoPriv[$c.Tag.Key].Hecho }
+        $reglas = @($datos.Prioridades | Where-Object { $_ -and $_.Exe })
+        if ($reglas.Count -and [System.Windows.MessageBox]::Show("El archivo trae $($reglas.Count) regla(s) de prioridad:`r`n" + (($reglas | ForEach-Object { " - $($_.Exe): $($script:Prioridades[[int]$_.Valor])" }) -join "`r`n") + "`r`n`r`n¿Añadirlas ahora a este equipo?", "Importar", "YesNo", "Question") -eq "Yes") {
+            foreach ($rg in $reglas) { try { Set-ReglaPrioridad ([string]$rg.Exe) ([int]$rg.Valor) } catch { Escribir-Log "No se pudo añadir la prioridad de $($rg.Exe): $($_.Exception.Message)" "AVISO" } }
+            Show-ReglasPrioridad
+        }
         Escribir-Log "Selección importada de $($dlg.FileName). Revisa las pestañas y pulsa Aplicar / Instalar."
-        [void][System.Windows.MessageBox]::Show("Selección importada. Aún no se aplicó nada: revisa Ajustes, Preferencias y Apps y pulsa sus botones.", "Importar", "OK", "Information")
+        [void][System.Windows.MessageBox]::Show("Configuración importada. Aún no se aplicó nada: revisa Ajustes, Preferencias, Privacidad y Apps y pulsa sus botones.", "Importar", "OK", "Information")
     } catch {
         [void][System.Windows.MessageBox]::Show("No se pudo leer el archivo: $($_.Exception.Message)", "Importar", "OK", "Error")
     }
@@ -2416,6 +2627,14 @@ try {
     }
 } catch { }
 
+# Salud de los discos (SMART)
+try {
+    foreach ($d in @(Get-PhysicalDisk -ErrorAction Stop)) {
+        if ([string]$d.HealthStatus -eq "Unhealthy") { Add-Hallazgo "Problema" "El disco $($d.FriendlyName) está fallando" "Windows lo marca como dañado. Haz copia de tus archivos y cámbialo cuanto antes. Más detalles en Rendimiento y disco > Salud de discos." "Discos" }
+        elseif ([string]$d.HealthStatus -eq "Warning") { Add-Hallazgo "Atencion" "El disco $($d.FriendlyName) da avisos de salud" "Puede empezar a fallar. Ten copia de lo importante y revisa los detalles en Rendimiento y disco > Salud de discos." "Discos" }
+    }
+} catch { }
+
 Write-Output "Análisis terminado."
 '@
 
@@ -2472,7 +2691,8 @@ $script:PanelHallazgos = New-Object System.Windows.Controls.StackPanel
 $script:AccionesAnalisis = @{
     LiberarRAM   = @{ Texto = "Liberar RAM";   Hacer = { Start-Pasos -Pasos @(New-PasoScript -Nombre "Liberar RAM" -Codigo $script:codigoLiberarRam) } }
     Temporales   = @{ Texto = "Limpiar";       Hacer = { if ($script:ItemTemporales) { Start-Pasos -Pasos @([pscustomobject]@{ Item = $script:ItemTemporales; Deshacer = $false }) -Titulo "Borrar archivos temporales" } } }
-    Arranque     = @{ Texto = "Revisar";       Hacer = { Start-Process "ms-settings:startupapps" } }
+    Arranque     = @{ Texto = "Revisar";       Hacer = { Select-Pestana "TabArranque" } }
+    Discos       = @{ Texto = "Ver";           Hacer = { Select-Pestana "TabRendimiento" } }
     Paginacion   = @{ Texto = "Arreglar";      Hacer = { Start-Pasos -Pasos @(New-PasoScript -Nombre "Memoria virtual en automático" -Codigo $script:codigoPaginacion) -OfrecerReinicio } }
     Fondo        = @{ Texto = "Aplicar";       Hacer = { Start-Pasos -Pasos @([pscustomobject]@{ Item = $script:ItemFondo; Deshacer = $false }) -Titulo "Evitar apps en segundo plano" } }
     Recomendados = @{ Texto = "Ver y marcar";  Hacer = { Select-Pestana "TabAjustes"; $script:UI.BtnRecomendados.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Button]::ClickEvent))) } }
@@ -2495,7 +2715,9 @@ function Invoke-AccionAnalisis([string]$Clave) {
 }
 
 function Start-Analisis {
-    if ($script:Trabajo) { return }
+    # Si hay otro trabajo en marcha, el análisis se hace al terminar
+    if ($script:Trabajo) { $script:AnalisisPendiente = $true; return }
+    $script:AnalisisPendiente = $false
     $global:Estado.Analisis = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
     $global:Estado.Metricas = [hashtable]::Synchronized(@{})
     $script:TxtResumenAnalisis.Text = "Analizando el equipo..."
@@ -2692,9 +2914,9 @@ New-TarjetaAccion -Panel $pR -Titulo "Ver qué ocupa espacio" -TextoBoton "Abrir
 
 [void]$pR.Children.Add((New-Titulo "Arranque" "Menos programas al encender = arranque más rápido y más RAM libre."))
 New-TarjetaAccion -Panel $pR -Titulo "Programas que arrancan con Windows" -TextoBoton "Abrir" -TextoBoton2 "Ver lista" -Riesgo "Bajo" `
-    -Descripcion "Abre la lista de Windows para activar o desactivar cada programa. 'Ver lista' los escribe en el registro de abajo." `
+    -Descripcion "Abre la pestaña 'Arranque de Windows', con todo lo que se inicia solo, su firma y un botón para desactivarlo. 'Ver lista' los escribe en el registro de abajo." `
     -Aviso "No desactives el antivirus ni los controladores de audio, touchpad o gráficos." `
-    -Accion { Invoke-AccionAnalisis "Arranque" } `
+    -Accion { Select-Pestana "TabArranque" } `
     -Accion2 { Start-Pasos -Pasos @(New-PasoScript -Nombre "Programas de arranque" -Codigo $script:codigoArranque) }
 
 $script:Protegidos = @(
@@ -3564,6 +3786,7 @@ $temporizador.Add_Tick({
         Update-VistaAjustes
         if ($script:TxtModoUpdates) { $script:TxtModoUpdates.Text = "Modo actual: " + (Get-ModoUpdates) }
         Update-EstadoRendimiento
+        if (Get-Command Update-VistasExtra -ErrorAction SilentlyContinue) { Update-VistasExtra }
         Show-ResumenTrabajo
         if ($script:AlTerminar) {
             $siguiente = $script:AlTerminar
@@ -3677,6 +3900,1643 @@ $script:Ventana.Add_Closing({
     }
 })
 
+
+# ================================================================ Mejoras: utilidades comunes
+function New-Texto {
+    param([string]$Texto, [string]$Color = "#4B5563", [double]$Tam = 13, [string]$Peso = "Normal", [string]$Margen = "0,0,0,0")
+    $t = New-Object System.Windows.Controls.TextBlock
+    $t.Text = $Texto
+    $t.TextWrapping = "Wrap"
+    $t.Foreground = Get-Pincel $Color
+    $t.FontSize = $Tam
+    $t.FontWeight = $Peso
+    $t.Margin = $Margen
+    return $t
+}
+
+function New-Boton {
+    # -Libre: no se desactiva mientras hay un trabajo en marcha (para filas de listas largas)
+    param([string]$Texto, [scriptblock]$Clic, [switch]$Primario, [string]$Margen = "0,0,6,6", [switch]$Libre)
+    $b = New-Object System.Windows.Controls.Button
+    $b.Content = $Texto
+    $b.Padding = "12,4"
+    $b.Margin = $Margen
+    $b.Tag = $true
+    if ($Primario) { $b.Style = $script:Ventana.FindResource("Primario") }
+    $b.Add_Click($Clic)
+    if (-not $Libre) {
+        $b.IsEnabled = -not $script:Trabajo
+        $script:BotonesSeguridad += $b
+    }
+    return $b
+}
+
+function New-Marco {
+    param([string]$Margen = "0,0,0,8", [string]$Borde = "#E2E6EC", [string]$Relleno = "14,10")
+    $m = New-Object System.Windows.Controls.Border
+    $m.Background = Get-Pincel "#FFFFFF"
+    $m.BorderBrush = Get-Pincel $Borde
+    $m.BorderThickness = 1
+    $m.CornerRadius = 8
+    $m.Padding = $Relleno
+    $m.Margin = $Margen
+    return $m
+}
+
+function New-Reg {
+    param([string]$Ruta, [string]$Nombre, $Valor, [string]$Tipo = "DWord", $Original = "<RemoveEntry>")
+    return [pscustomobject]@{ Path = $Ruta; Name = $Nombre; Type = $Tipo; Value = [string]$Valor; OriginalValue = [string]$Original }
+}
+
+function New-ItemPropio {
+    param([string]$Clave, [string]$Nombre, [string]$Grupo, [string]$Riesgo, [string]$Descripcion, [string]$Aviso = "", [object[]]$Registro = @(), [string]$Detalle = "", [string[]]$Script = @(), [string[]]$Deshacer = @())
+    return [pscustomobject]@{ Key = $Clave; Nombre = $Nombre; Grupo = $Grupo; Riesgo = $Riesgo; Descripcion = $Descripcion; Aviso = $Aviso
+        Detalle = $Detalle; registry = @($Registro); service = @(); InvokeScript = @($Script); UndoScript = @($Deshacer) }
+}
+
+function Test-ItemAplicado($Item) {
+    if (-not $Item) { return $false }
+    $carpetaDatos = Join-Path $env:LOCALAPPDATA "OptimizadorES"
+    if ($Item.Key -eq "OPT_ENERGIA_ALTA") { return (Test-Path -LiteralPath (Join-Path $carpetaDatos "respaldo-energia.json")) }
+    if ($Item.Key -eq "OPT_VIGILANCIA") { return ((Test-Path -LiteralPath (Join-Path $carpetaDatos "respaldo-vigilancia.json")) -and (Test-AjusteAplicado $Item)) }
+    return (Test-AjusteAplicado $Item)
+}
+
+# Ajustes propios (mismo formato que los de WinUtil: se guardan con respaldo y se deshacen exacto)
+$script:ItemsExtra = @{}
+foreach ($it in @($script:ItemFondo, $script:ItemServiciosRam)) { if ($it) { $script:ItemsExtra[$it.Key] = $it } }
+
+# ---------------------------------------------------------------- Pestaña Perfiles
+$script:codigoEnergiaAlta = @'
+$respaldo = Join-Path $env:LOCALAPPDATA "OptimizadorES\respaldo-energia.json"
+$patronGuid = '[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}'
+$planAlto = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+$planActivo = [regex]::Match((powercfg /getactivescheme | Out-String), $patronGuid).Value
+if (-not (Test-Path -LiteralPath $respaldo)) {
+    New-Item -ItemType Directory -Force -Path (Split-Path $respaldo) | Out-Null
+    @{ Plan = $planActivo } | ConvertTo-Json | Set-Content -LiteralPath $respaldo -Encoding UTF8
+    Write-Output "Guardado tu plan de energía actual ($planActivo) para poder volver a él."
+}
+if ((powercfg /list | Out-String) -notmatch $planAlto) {
+    # Algunos portátiles no traen el plan: se crea una copia
+    $nuevo = [regex]::Match((powercfg /duplicatescheme $planAlto | Out-String), $patronGuid).Value
+    if (-not $nuevo) { throw "Este equipo no tiene el plan Alto rendimiento y no se pudo crear." }
+    $planAlto = $nuevo
+}
+powercfg /setactive $planAlto
+if ($LASTEXITCODE -ne 0) { throw "powercfg no pudo activar el plan (código $LASTEXITCODE)." }
+Write-Output "Plan de energía activo: Alto rendimiento."
+'@
+
+$script:codigoEnergiaVolver = @'
+$respaldo = Join-Path $env:LOCALAPPDATA "OptimizadorES\respaldo-energia.json"
+$plan = "381b4222-f694-41f0-9685-ff5bb260df2e"
+if (Test-Path -LiteralPath $respaldo) {
+    try { $g = (Get-Content -LiteralPath $respaldo -Raw -Encoding UTF8 | ConvertFrom-Json).Plan; if ($g) { $plan = $g } } catch { }
+}
+powercfg /setactive $plan
+if ($LASTEXITCODE -ne 0) { powercfg /setactive 381b4222-f694-41f0-9685-ff5bb260df2e }
+Remove-Item -LiteralPath $respaldo -Force -ErrorAction SilentlyContinue
+Write-Output "Vuelve a estar activo tu plan de energía anterior."
+'@
+
+$script:ItemsExtra["OPT_ENERGIA_ALTA"] = New-ItemPropio -Clave "OPT_ENERGIA_ALTA" -Nombre "Plan de energía Alto rendimiento" -Grupo "Perfiles" -Riesgo "Bajo" `
+    -Descripcion "El procesador deja de bajar su velocidad para ahorrar energía." -Aviso "Gasta algo más de luz; en portátiles dura menos la batería." `
+    -Detalle "Guarda cuál es tu plan de energía y activa 'Alto rendimiento' (si el equipo no lo trae, lo crea). Deshacer vuelve a tu plan anterior." `
+    -Script @($script:codigoEnergiaAlta) -Deshacer @($script:codigoEnergiaVolver)
+
+$script:ItemsExtra["OPT_JUEGOS"] = New-ItemPropio -Clave "OPT_JUEGOS" -Nombre "Ajustes para juegos" -Grupo "Perfiles" -Riesgo "Medio" `
+    -Descripcion "Modo de juego activado, sin grabación de fondo de Xbox Game Bar y con la programación de GPU acelerada por hardware." `
+    -Aviso "La grabación de clips de Xbox Game Bar deja de funcionar. La programación de GPU necesita reiniciar y una tarjeta compatible: si notas tirones, deshazlo." `
+    -Registro @(
+        (New-Reg "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 0 "DWord" 1),
+        (New-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR" "AllowGameDVR" 0),
+        (New-Reg "HKCU:\Software\Microsoft\GameBar" "AutoGameModeEnabled" 1),
+        (New-Reg "HKCU:\Software\Microsoft\GameBar" "AllowAutoGameMode" 1),
+        (New-Reg "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" "HwSchMode" 2)
+    )
+
+# Programas de cámaras de seguridad (Hikvision iVMS, Dahua SmartPSS y otros)
+$script:PatronCamaras = 'iVMS|SmartPSS|HikCentral|NVMS|Guarding ?Vision|XProtect|Blue ?Iris|KBiVMS|CMS ?Client'
+$script:ProgramaCamaras = $null
+
+function Find-ProgramaCamaras {
+    $exes = New-Object System.Collections.Generic.List[string]
+    foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+        try { if ($p.Path -and $p.Path -match $script:PatronCamaras -and -not $exes.Contains($p.Path)) { $exes.Add($p.Path) } } catch { }
+    }
+    $carpetas = @()
+    foreach ($raiz in @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | Select-Object -Unique) {
+        $carpetas += @(Get-ChildItem -LiteralPath $raiz -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match $script:PatronCamaras })
+    }
+    foreach ($c in $carpetas) {
+        Get-ChildItem -LiteralPath $c.FullName -Recurse -Depth 3 -Filter "*.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match "$($script:PatronCamaras)|Framework" -and $_.Name -notmatch '(?i)unins|setup|update|upgrade|crash|report|install|helper' } |
+            ForEach-Object { if (-not $exes.Contains($_.FullName)) { $exes.Add($_.FullName) } }
+    }
+    $acceso = $null
+    foreach ($menu in @([Environment]::GetFolderPath("CommonPrograms"), [Environment]::GetFolderPath("Programs"))) {
+        if (-not $menu) { continue }
+        $acceso = Get-ChildItem -LiteralPath $menu -Recurse -Filter "*.lnk" -ErrorAction SilentlyContinue |
+            Where-Object { $_.BaseName -match $script:PatronCamaras -and $_.BaseName -notmatch '(?i)unins|desinst|player|tool|help|ayuda|manual|readme' } | Select-Object -First 1
+        if ($acceso) { break }
+    }
+    $nombreCam = if ($carpetas.Count) { $carpetas[0].Name } elseif ($exes.Count) { [IO.Path]::GetFileNameWithoutExtension($exes[0]) } else { "" }
+    $graficas = @()
+    try { $graficas = @(Get-CimInstance Win32_VideoController -ErrorAction Stop | ForEach-Object { [string]$_.Name }) } catch { }
+    return [pscustomobject]@{
+        Nombre = $nombreCam; Exes = @($exes | Select-Object -First 12); Acceso = $(if ($acceso) { $acceso.FullName } else { "" })
+        UsarIntel = (@($graficas | Where-Object { $_ -match "Intel" }).Count -gt 0 -and $graficas.Count -gt 1)
+    }
+}
+
+$script:codigoVigilancia = @'
+$respaldo = Join-Path $env:LOCALAPPDATA "OptimizadorES\respaldo-vigilancia.json"
+$acceso = '__ACCESO__'
+function Get-ValorEnergia([string]$Sub, [string]$Opcion) {
+    $txt = (powercfg /q SCHEME_CURRENT $Sub $Opcion 2>$null | Out-String)
+    $h = [regex]::Matches($txt, '0x[0-9a-fA-F]{8}')
+    if ($h.Count -ge 2) { return [Convert]::ToInt64($h[$h.Count - 2].Value, 16) }
+    return $null
+}
+$energia = @(
+    @{ Sub = "SUB_SLEEP"; Opcion = "STANDBYIDLE"; Nombre = "Suspender" },
+    @{ Sub = "SUB_SLEEP"; Opcion = "HIBERNATEIDLE"; Nombre = "Hibernar" },
+    @{ Sub = "SUB_DISK"; Opcion = "DISKIDLE"; Nombre = "Apagar los discos" },
+    @{ Sub = "SUB_VIDEO"; Opcion = "VIDEOIDLE"; Nombre = "Apagar la pantalla" },
+    @{ Sub = "2a737441-1930-4402-8d77-b2bebba308a3"; Opcion = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"; Nombre = "Suspensión selectiva de USB" },
+    @{ Sub = "SUB_PCIEXPRESS"; Opcion = "ASPM"; Nombre = "Ahorro de energía de PCI Express" }
+)
+if (-not (Test-Path -LiteralPath $respaldo)) {
+    $antes = @{ Energia = @(); Red = @(); Acceso = "" }
+    foreach ($x in $energia) {
+        $v = Get-ValorEnergia $x.Sub $x.Opcion
+        if ($null -ne $v) { $antes.Energia += @{ Sub = $x.Sub; Opcion = $x.Opcion; Valor = $v } }
+    }
+    foreach ($a in @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue)) {
+        try {
+            $pm = Get-NetAdapterPowerManagement -Name $a.Name -ErrorAction Stop
+            $antes.Red += @{ Nombre = $a.Name; Valor = [string]$pm.AllowComputerToTurnOffDevice }
+        } catch { }
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path $respaldo) | Out-Null
+    $antes | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $respaldo -Encoding UTF8
+    Write-Output "Guardada la configuración de energía y red actual, para poder deshacer."
+}
+foreach ($x in $energia) {
+    powercfg /setacvalueindex SCHEME_CURRENT $x.Sub $x.Opcion 0 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { Write-Output "$($x.Nombre): nunca (con el equipo enchufado)." }
+}
+powercfg /setactive SCHEME_CURRENT | Out-Null
+foreach ($a in @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue)) {
+    try {
+        Set-NetAdapterPowerManagement -Name $a.Name -AllowComputerToTurnOffDevice Disabled -ErrorAction Stop
+        Write-Output "Red '$($a.Name)': Windows ya no la apaga para ahorrar energía."
+    } catch { }
+}
+if ($acceso -and (Test-Path -LiteralPath $acceso)) {
+    $destino = Join-Path ([Environment]::GetFolderPath("Startup")) (Split-Path $acceso -Leaf)
+    $yaArranca = @(Get-CimInstance Win32_StartupCommand -ErrorAction SilentlyContinue | Where-Object { "$($_.Command) $($_.Name)" -match '__PATRON__' }).Count
+    if ($yaArranca -eq 0 -and -not (Test-Path -LiteralPath $destino)) {
+        Copy-Item -LiteralPath $acceso -Destination $destino -Force
+        $datos = Get-Content -LiteralPath $respaldo -Raw -Encoding UTF8 | ConvertFrom-Json
+        $datos.Acceso = $destino
+        $datos | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $respaldo -Encoding UTF8
+        Write-Output "El programa de cámaras se abrirá solo al iniciar sesión."
+    } else {
+        Write-Output "El programa de cámaras ya se abre solo al iniciar Windows."
+    }
+} else {
+    Write-Output "No se encontró el acceso directo del programa de cámaras; si quieres que se abra solo, añádelo al arranque."
+}
+'@
+
+$script:codigoVigilanciaDeshacer = @'
+$respaldo = Join-Path $env:LOCALAPPDATA "OptimizadorES\respaldo-vigilancia.json"
+if (-not (Test-Path -LiteralPath $respaldo)) {
+    Write-Output "No hay configuración de energía guardada; se deja como está."
+    return
+}
+$datos = Get-Content -LiteralPath $respaldo -Raw -Encoding UTF8 | ConvertFrom-Json
+foreach ($x in @($datos.Energia)) { powercfg /setacvalueindex SCHEME_CURRENT $x.Sub $x.Opcion $x.Valor 2>$null | Out-Null }
+powercfg /setactive SCHEME_CURRENT | Out-Null
+foreach ($r in @($datos.Red)) {
+    if (@("Enabled", "Disabled") -contains [string]$r.Valor) {
+        try { Set-NetAdapterPowerManagement -Name $r.Nombre -AllowComputerToTurnOffDevice $r.Valor -ErrorAction Stop } catch { }
+    }
+}
+if ($datos.Acceso -and (Test-Path -LiteralPath $datos.Acceso)) {
+    Remove-Item -LiteralPath $datos.Acceso -Force
+    Write-Output "Quitado el arranque automático del programa de cámaras."
+}
+Remove-Item -LiteralPath $respaldo -Force
+Write-Output "Energía y red vuelven a estar como antes."
+'@
+
+function Get-ItemVigilancia {
+    if (-not $script:ProgramaCamaras) { $script:ProgramaCamaras = Find-ProgramaCamaras }
+    $cam = $script:ProgramaCamaras
+    $regs = @(
+        (New-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" "NoAutoRebootWithLoggedOnUsers" 1)
+    )
+    $vistosExe = @{}
+    foreach ($e in @($cam.Exes)) {
+        if ($cam.UsarIntel) { $regs += New-Reg "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences" $e "GpuPreference=1;" "String" }
+        $hoja = Split-Path $e -Leaf
+        if ($vistosExe.ContainsKey($hoja)) { continue }
+        $vistosExe[$hoja] = $true
+        $regs += New-Reg "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$hoja\PerfOptions" "CpuPriorityClass" 6
+    }
+    $codigo = $script:codigoVigilancia.Replace("__ACCESO__", ([string]$cam.Acceso).Replace("'", "''")).Replace("__PATRON__", $script:PatronCamaras)
+    $detalleCam = if ($cam.Exes.Count) { "Programa de cámaras encontrado: $($cam.Nombre) ($($cam.Exes.Count) archivo(s)). Se le da prioridad 'por encima de lo normal'" + $(if ($cam.UsarIntel) { " y se le asigna la gráfica Intel, que decodifica H.264/H.265 por hardware." } else { "." }) } else { "No se encontró iVMS ni otro programa de cámaras: solo se aplica la parte de energía, red y Windows Update." }
+    return New-ItemPropio -Clave "OPT_VIGILANCIA" -Nombre "Equipo encendido 24/7 para grabar cámaras" -Grupo "Perfiles" -Riesgo "Bajo" `
+        -Descripcion "Nunca suspende ni apaga discos, pantalla, USB ni red; Windows Update no reinicia solo con la sesión abierta; el programa de cámaras tiene prioridad y se abre al iniciar." `
+        -Aviso "Gasta algo más de luz porque el equipo nunca descansa (es lo normal en un grabador)." `
+        -Detalle ($detalleCam + "`nDeshacer devuelve la energía, la red y el arranque a como estaban.") `
+        -Registro $regs -Script @($codigo) -Deshacer @($script:codigoVigilanciaDeshacer)
+}
+
+function Get-ItemPorClave([string]$Clave) {
+    if ($Clave -eq "OPT_VIGILANCIA") { return (Get-ItemVigilancia) }
+    if ($script:ItemsExtra.ContainsKey($Clave)) { return $script:ItemsExtra[$Clave] }
+    return @($script:Ajustes | Where-Object { $_.Key -eq $Clave })[0]
+}
+
+$script:PerfilesDef = @(
+    @{ Clave = "Basico"; Nombre = "Básico seguro"; Glifo = [string][char]0xE73E; Riesgo = "Bajo"
+       Para = "Para cualquier PC. Quita telemetría, sugerencias y servicios que sobran, y evita que las apps se queden abiertas en segundo plano."
+       Claves = { @($script:Ajustes | Where-Object { $_.Grupo -eq "Esenciales" -and $_.Riesgo -eq "Bajo" -and $_.Key -ne "WPFTweaksRestorePoint" } | ForEach-Object { $_.Key }) + @("OPT_FONDO") } }
+    @{ Clave = "Oficina"; Nombre = "Oficina"; Glifo = [string][char]0xE821; Riesgo = "Bajo"
+       Para = "Para trabajar: lo del perfil Básico más la privacidad verde (sin anuncios, sin seguimiento y sin consejos que interrumpen)."
+       Claves = { @($script:Ajustes | Where-Object { $_.Grupo -eq "Esenciales" -and $_.Riesgo -eq "Bajo" -and $_.Key -ne "WPFTweaksRestorePoint" } | ForEach-Object { $_.Key }) + @("OPT_FONDO") + @($script:ItemsPrivacidad | Where-Object { $_.Riesgo -eq "Bajo" } | ForEach-Object { $_.Key }) } }
+    @{ Clave = "Juegos"; Nombre = "Juegos"; Glifo = [string][char]0xE7FC; Riesgo = "Medio"
+       Para = "Para jugar: lo del perfil Básico, plan de energía Alto rendimiento, modo de juego y sin grabación de fondo."
+       Claves = { @($script:Ajustes | Where-Object { $_.Grupo -eq "Esenciales" -and $_.Riesgo -eq "Bajo" -and $_.Key -ne "WPFTweaksRestorePoint" } | ForEach-Object { $_.Key }) + @("OPT_FONDO", "OPT_ENERGIA_ALTA", "OPT_JUEGOS") } }
+    @{ Clave = "Vigilancia"; Nombre = "PC de videovigilancia"; Glifo = [string][char]0xE714; Riesgo = "Bajo"
+       Para = "Para un equipo que graba cámaras día y noche (iVMS-4200, SmartPSS...). No toca la red, el antivirus ni el programa de cámaras; solo evita que Windows lo interrumpa."
+       Claves = { @("OPT_ENERGIA_ALTA", "OPT_VIGILANCIA", "OPT_FONDO", "OPT_SERVICIOS_RAM", "PRIV_CONSEJOS", "PRIV_SUGERENCIAS", "WPFTweaksConsumerFeatures") } }
+)
+$script:TarjetasPerfil = @{}
+
+function Get-ItemsPerfil($Perfil) {
+    return @(& $Perfil.Claves | Select-Object -Unique | ForEach-Object { Get-ItemPorClave $_ } | Where-Object { $_ })
+}
+
+function Update-EstadoPerfiles {
+    foreach ($p in $script:PerfilesDef) {
+        $t = $script:TarjetasPerfil[$p.Clave]
+        if (-not $t) { continue }
+        $items = Get-ItemsPerfil $p
+        $hechos = @($items | Where-Object { Test-ItemAplicado $_ }).Count
+        $comprobables = @($items | Where-Object { (@($_.registry | Where-Object { $_ }).Count + @($_.service | Where-Object { $_ }).Count) -gt 0 -or $_.Key -like "OPT_*" }).Count
+        if ($comprobables -and $hechos -ge $comprobables) {
+            $t.Estado.Text = "$([char]0x2714) Aplicado en este equipo"
+            $t.Estado.Foreground = Get-Pincel "#16A34A"
+            $t.Marco.BorderBrush = Get-Pincel "#86EFAC"
+        } elseif ($hechos) {
+            $t.Estado.Text = "Aplicado en parte: $hechos de $comprobables cambios ya están hechos."
+            $t.Estado.Foreground = Get-Pincel "#D97706"
+            $t.Marco.BorderBrush = Get-Pincel "#E2E6EC"
+        } else {
+            $t.Estado.Text = "Sin aplicar."
+            $t.Estado.Foreground = Get-Pincel "#6B7280"
+            $t.Marco.BorderBrush = Get-Pincel "#E2E6EC"
+        }
+    }
+    if ($script:TxtCamaras -and $script:ProgramaCamaras) {
+        $cam = $script:ProgramaCamaras
+        $script:TxtCamaras.Text = if ($cam.Exes.Count) {
+            "$([char]0x2714) Programa de cámaras detectado: $($cam.Nombre). " + $(if ($cam.UsarIntel) { "Se usará la gráfica Intel para el video." } else { "" }) + $(if ($cam.Acceso) { " Se abrirá solo al encender." } else { "" })
+        } else { "No se encontró iVMS ni otro programa de cámaras. Si lo tienes abierto ahora, el perfil lo detecta igual al aplicarlo." }
+    }
+}
+
+function Start-Perfil([string]$Clave, [bool]$Deshacer) {
+    $perfil = @($script:PerfilesDef | Where-Object { $_.Clave -eq $Clave })[0]
+    if (-not $perfil) { return }
+    if ($Clave -eq "Vigilancia") { $script:ProgramaCamaras = Find-ProgramaCamaras }
+    $items = Get-ItemsPerfil $perfil
+    if (-not $Deshacer) {
+        $pendientes = @($items | Where-Object { -not (Test-ItemAplicado $_) })
+        if ($pendientes.Count -eq 0) {
+            [void][System.Windows.MessageBox]::Show("El perfil '$($perfil.Nombre)' ya está aplicado en este equipo.", "Perfiles", "OK", "Information")
+            return
+        }
+        $msg = "Perfil '$($perfil.Nombre)': se aplicarán $($pendientes.Count) cambio(s):`r`n" + (($pendientes | Select-Object -First 25 | ForEach-Object { " - $($_.Nombre)" }) -join "`r`n")
+        if ($pendientes.Count -gt 25) { $msg += "`r`n ... y $($pendientes.Count - 25) más" }
+        $medios = @($pendientes | Where-Object { $_.Riesgo -ne "Bajo" })
+        if ($medios.Count) { $msg += "`r`n`r`nTen en cuenta:`r`n" + (($medios | ForEach-Object { " - $($_.Nombre): $($_.Aviso)" }) -join "`r`n") }
+        $msg += "`r`n`r`nAntes se crea un punto de restauración y se guarda cómo estaba cada cosa, así 'Deshacer perfil' lo deja igual que ahora.`r`n`r`n¿Continuar?"
+        if ([System.Windows.MessageBox]::Show($msg, "Aplicar perfil", "YesNo", $(if ($medios.Count) { "Warning" } else { "Question" })) -ne "Yes") { return }
+        $pasos = @([pscustomobject]@{ Item = (Get-ItemPorClave "WPFTweaksRestorePoint"); Deshacer = $false })
+        $pasos += @($pendientes | ForEach-Object { [pscustomobject]@{ Item = $_; Deshacer = $false } })
+        Start-Pasos -Pasos $pasos -Titulo "Perfil $($perfil.Nombre)" -OfrecerReinicio
+    } else {
+        $hechos = @($items | Where-Object { Test-ItemAplicado $_ })
+        if ($hechos.Count -eq 0) {
+            [void][System.Windows.MessageBox]::Show("No hay nada de este perfil aplicado que se pueda deshacer.", "Perfiles", "OK", "Information")
+            return
+        }
+        $msg = "Se desharán $($hechos.Count) cambio(s) del perfil '$($perfil.Nombre)' y todo vuelve a como estaba antes de aplicarlo.`r`n`r`nOjo: si alguno de estos ajustes ya lo tenías aplicado por tu cuenta, también se deshace.`r`n`r`n¿Continuar?"
+        if ([System.Windows.MessageBox]::Show($msg, "Deshacer perfil", "YesNo", "Question") -ne "Yes") { return }
+        [array]::Reverse($hechos)
+        Start-Pasos -Pasos @($hechos | ForEach-Object { [pscustomobject]@{ Item = $_; Deshacer = $true } }) -Titulo "Deshacer perfil $($perfil.Nombre)" -OfrecerReinicio
+    }
+}
+
+$pPerf = $script:UI.PanelPerfiles
+[void]$pPerf.Children.Add((New-Titulo "Perfiles de un clic" "Elige para qué usas este equipo y se aplica todo lo que conviene de una vez. Siempre se crea antes un punto de restauración y cada perfil se puede deshacer."))
+foreach ($p in $script:PerfilesDef) {
+    $marco = New-Marco -Relleno "16,12"
+    $pila = New-Object System.Windows.Controls.StackPanel
+    $cab = New-Object System.Windows.Controls.DockPanel
+    $color = $script:Colores[$p.Riesgo]
+    $etq = New-Object System.Windows.Controls.Border
+    $etq.Background = Get-Pincel $color.Fondo
+    $etq.CornerRadius = 10
+    $etq.Padding = "8,1"
+    $etq.VerticalAlignment = "Center"
+    $etq.Child = New-Texto $color.Etiqueta $color.Texto 11 "SemiBold"
+    [System.Windows.Controls.DockPanel]::SetDock($etq, "Right")
+    [void]$cab.Children.Add($etq)
+    $ico = New-Texto $p.Glifo "#2563EB" 20
+    $ico.FontFamily = "Segoe MDL2 Assets"
+    $ico.Margin = "0,0,12,0"
+    $ico.VerticalAlignment = "Center"
+    [System.Windows.Controls.DockPanel]::SetDock($ico, "Left")
+    [void]$cab.Children.Add($ico)
+    [void]$cab.Children.Add((New-Texto $p.Nombre "#111827" 16 "SemiBold"))
+    [void]$pila.Children.Add($cab)
+    [void]$pila.Children.Add((New-Texto $p.Para "#4B5563" 13 "Normal" "32,4,0,0"))
+    if ($p.Clave -eq "Vigilancia") {
+        $script:TxtCamaras = New-Texto "Se buscará el programa de cámaras al abrir esta pestaña." "#1D4ED8" 12.5 "SemiBold" "32,4,0,0"
+        [void]$pila.Children.Add($script:TxtCamaras)
+        $consejos = "Además, hazlo tú una vez:`n" +
+            "  • En iVMS: Configuración del sistema > Imagen > Hardware: D3D11 (decodificación por hardware).`n" +
+            "  • En la BIOS: 'Restore on AC Power Loss' = Power On, para que encienda solo tras un corte de luz.`n" +
+            "  • Graba en un disco aparte y revisa su salud en Rendimiento > Salud de discos."
+        [void]$pila.Children.Add((New-Texto $consejos "#6B7280" 12 "Normal" "32,6,0,0"))
+    }
+    # Lista de lo que hace (se arma al abrir, para que la ventana cargue rápido)
+    $exp = New-Object System.Windows.Controls.Expander
+    $exp.Header = "Ver la lista de cambios"
+    $exp.Foreground = Get-Pincel "#2563EB"
+    $exp.FontSize = 12
+    $exp.Margin = "32,6,0,0"
+    $exp.Tag = $p.Clave
+    $exp.Add_Expanded({
+        param($origen, $e)
+        $perfil = @($script:PerfilesDef | Where-Object { $_.Clave -eq $origen.Tag })[0]
+        $lineas = foreach ($it in (Get-ItemsPerfil $perfil)) {
+            $marca = if (Test-ItemAplicado $it) { [char]0x2714 } else { [char]0x2022 }
+            "$marca $($it.Nombre) ($($script:Colores[$it.Riesgo].Etiqueta.ToLower()))"
+        }
+        $txt = New-Object System.Windows.Controls.TextBox
+        $txt.Text = (@($lineas) -join "`n") + "`n`n$([char]0x2714) = ya está hecho en este equipo."
+        $txt.IsReadOnly = $true
+        $txt.TextWrapping = "Wrap"
+        $txt.BorderThickness = 0
+        $txt.Background = Get-Pincel "#F3F4F6"
+        $txt.Foreground = Get-Pincel "#374151"
+        $txt.FontSize = 12
+        $txt.Padding = "10,8"
+        $txt.Margin = "0,4,0,2"
+        $origen.Content = $txt
+    })
+    [void]$pila.Children.Add($exp)
+    $estadoP = New-Texto "" "#6B7280" 12.5 "SemiBold" "32,6,0,0"
+    [void]$pila.Children.Add($estadoP)
+    $fila = New-Object System.Windows.Controls.WrapPanel
+    $fila.Margin = "32,8,0,0"
+    [void]$fila.Children.Add((New-Boton "Aplicar perfil" ([scriptblock]::Create("Start-Perfil '$($p.Clave)' `$false")) -Primario))
+    [void]$fila.Children.Add((New-Boton "Deshacer perfil" ([scriptblock]::Create("Start-Perfil '$($p.Clave)' `$true"))))
+    [void]$pila.Children.Add($fila)
+    $marco.Child = $pila
+    [void]$pPerf.Children.Add($marco)
+    $script:TarjetasPerfil[$p.Clave] = @{ Marco = $marco; Estado = $estadoP }
+}
+
+# ---------------------------------------------------------------- Pestaña Privacidad (por niveles, como O&O ShutUp10)
+$cdm = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+$consent = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore"
+$script:ItemsPrivacidad = @(
+    (New-ItemPropio "PRIV_PUBLICIDAD" "Sin ID de publicidad" "Privacidad" "Bajo" "Las apps no pueden usar un identificador tuyo para mostrarte anuncios personalizados." "" @(
+        (New-Reg "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 0 "DWord" 1),
+        (New-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo" "DisabledByGroupPolicy" 1))),
+    (New-ItemPropio "PRIV_SUGERENCIAS" "Sin anuncios ni apps sugeridas en Inicio" "Privacidad" "Bajo" "Windows deja de instalar solo juegos y apps promocionadas (Candy Crush, etc.) y de mostrar sugerencias en el menú Inicio." "" @(
+        (New-Reg $cdm "SystemPaneSuggestionsEnabled" 0 "DWord" 1), (New-Reg $cdm "SubscribedContent-338388Enabled" 0 "DWord" 1),
+        (New-Reg $cdm "SilentInstalledAppsEnabled" 0 "DWord" 1), (New-Reg $cdm "PreInstalledAppsEnabled" 0 "DWord" 1),
+        (New-Reg $cdm "OemPreInstalledAppsEnabled" 0 "DWord" 1))),
+    (New-ItemPropio "PRIV_CONSEJOS" "Sin consejos ni avisos de 'termina de configurar'" "Privacidad" "Bajo" "Quita las notificaciones de trucos de Windows, la pantalla de bienvenida tras actualizar y el aviso de 'Terminemos de configurar el dispositivo'." "" @(
+        (New-Reg $cdm "SubscribedContent-338389Enabled" 0 "DWord" 1), (New-Reg $cdm "SoftLandingEnabled" 0 "DWord" 1),
+        (New-Reg $cdm "SubscribedContent-310093Enabled" 0 "DWord" 1),
+        (New-Reg "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 0))),
+    (New-ItemPropio "PRIV_CONFIGURACION" "Sin contenido sugerido en Configuración" "Privacidad" "Bajo" "La app Configuración deja de mostrarte sugerencias y promociones de Microsoft." "" @(
+        (New-Reg $cdm "SubscribedContent-338393Enabled" 0 "DWord" 1), (New-Reg $cdm "SubscribedContent-353694Enabled" 0 "DWord" 1),
+        (New-Reg $cdm "SubscribedContent-353696Enabled" 0 "DWord" 1))),
+    (New-ItemPropio "PRIV_IDIOMAS" "Las webs no ven tu lista de idiomas" "Privacidad" "Bajo" "Las páginas web ya no pueden leer qué idiomas tienes instalados (se usa para identificarte)." "" @(
+        (New-Reg "HKCU:\Control Panel\International\User Profile" "HttpAcceptLanguageOptOut" 1))),
+    (New-ItemPropio "PRIV_APPS_ABIERTAS" "No registrar qué apps abres" "Privacidad" "Bajo" "Windows deja de anotar qué programas abres para ordenar el menú Inicio y la búsqueda." "La lista de 'más usadas' del menú Inicio queda vacía." @(
+        (New-Reg "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Start_TrackProgs" 0 "DWord" 1))),
+    (New-ItemPropio "PRIV_EXPERIENCIAS" "Sin experiencias personalizadas con tus datos" "Privacidad" "Bajo" "Microsoft no usa tus datos de diagnóstico para mostrarte consejos, anuncios y recomendaciones." "" @(
+        (New-Reg "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 0 "DWord" 1),
+        (New-Reg "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData" 1))),
+    (New-ItemPropio "PRIV_OPINIONES" "Windows no te pide tu opinión" "Privacidad" "Bajo" "Desactiva las encuestas y ventanas de 'califica tu experiencia'." "" @(
+        (New-Reg "HKCU:\Software\Microsoft\Siuf\Rules" "NumberOfSIUFInPeriod" 0),
+        (New-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" "DoNotShowFeedbackNotifications" 1))),
+    (New-ItemPropio "PRIV_TELEMETRIA" "Telemetría al mínimo" "Privacidad" "Medio" "Windows envía a Microsoft solo los datos de diagnóstico imprescindibles." "El programa Windows Insider deja de funcionar y algunos solucionadores automáticos de problemas tienen menos información." @(
+        (New-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" "AllowTelemetry" 0),
+        (New-Reg "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection" "AllowTelemetry" 0))),
+    (New-ItemPropio "PRIV_ACTIVIDAD" "Sin historial de actividad" "Privacidad" "Medio" "Windows deja de guardar y subir a la nube lo que haces (documentos, páginas, apps)." "La 'Línea de tiempo' de Windows 10 y 'seguir donde lo dejaste' en otros equipos dejan de funcionar." @(
+        (New-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" "EnableActivityFeed" 0),
+        (New-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" "PublishUserActivities" 0),
+        (New-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" "UploadUserActivities" 0))),
+    (New-ItemPropio "PRIV_ESCRITURA" "No enviar lo que escribes ni tu voz" "Privacidad" "Medio" "Windows deja de recopilar lo que tecleas, escribes a mano o dictas para 'mejorar' el reconocimiento." "El dictado por voz en línea (Windows + H) deja de funcionar." @(
+        (New-Reg "HKCU:\Software\Microsoft\InputPersonalization" "RestrictImplicitInkCollection" 1 "DWord" 0),
+        (New-Reg "HKCU:\Software\Microsoft\InputPersonalization" "RestrictImplicitTextCollection" 1 "DWord" 0),
+        (New-Reg "HKCU:\Software\Microsoft\InputPersonalization\TrainedDataStore" "HarvestContacts" 0 "DWord" 1),
+        (New-Reg "HKCU:\Software\Microsoft\Personalization\Settings" "AcceptedPrivacyPolicy" 0 "DWord" 1),
+        (New-Reg "HKCU:\Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy" "HasAccepted" 0 "DWord" 1))),
+    (New-ItemPropio "PRIV_BUSQUEDA" "Búsqueda solo en el equipo (sin Bing ni Cortana)" "Privacidad" "Medio" "Lo que escribes en la búsqueda de Inicio ya no se envía a Bing, y Cortana queda desactivada." "La búsqueda de Inicio deja de mostrar resultados de Internet." @(
+        (New-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" "AllowCortana" 0),
+        (New-Reg "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions" 1),
+        (New-Reg "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 0 "DWord" 1))),
+    (New-ItemPropio "PRIV_ERRORES" "No enviar informes de errores a Microsoft" "Privacidad" "Medio" "Cuando un programa se cuelga, Windows ya no manda el informe a Microsoft." "Microsoft no podrá ofrecerte soluciones a cuelgues conocidos." @(
+        (New-Reg "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" "Disabled" 1),
+        (New-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Error Reporting" "Disabled" 1))),
+    (New-ItemPropio "PRIV_COPILOT" "Copilot y Recall desactivados" "Privacidad" "Medio" "Apaga el asistente Copilot y que Windows guarde capturas de lo que haces (Recall), donde existan." "Si usas Copilot en Windows, deja de estar disponible." @(
+        (New-Reg "HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot" "TurnOffWindowsCopilot" 1),
+        (New-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot" "TurnOffWindowsCopilot" 1),
+        (New-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI" "DisableAIDataAnalysis" 1))),
+    (New-ItemPropio "PRIV_UBICACION" "Ubicación apagada en todo el equipo" "Privacidad" "Alto" "Ninguna app ni Windows pueden saber dónde está el equipo." "Dejan de funcionar mapas, el tiempo local, 'Buscar mi dispositivo' y la zona horaria automática." @(
+        (New-Reg "$consent\location" "Value" "Deny" "String" "Allow"))),
+    (New-ItemPropio "PRIV_CAMARA" "Ninguna app puede usar la cámara web" "Privacidad" "Alto" "Bloquea la cámara web para todas las apps." "Las videollamadas (Zoom, Teams, WhatsApp) dejan de ver la cámara. No afecta a las cámaras IP de vigilancia, que van por la red." @(
+        (New-Reg "$consent\webcam" "Value" "Deny" "String" "Allow"))),
+    (New-ItemPropio "PRIV_MICROFONO" "Ninguna app puede usar el micrófono" "Privacidad" "Alto" "Bloquea el micrófono para todas las apps." "Las llamadas, el dictado y las grabaciones de audio dejan de oírte." @(
+        (New-Reg "$consent\microphone" "Value" "Deny" "String" "Allow"))),
+    (New-ItemPropio "PRIV_SINCRONIZAR" "No sincronizar ajustes con tu cuenta Microsoft" "Privacidad" "Alto" "El fondo, el idioma, las contraseñas de Wi-Fi y otros ajustes dejan de copiarse a tu cuenta y a tus otros equipos." "Si cambias de PC, tendrás que volver a configurar todo a mano." @(
+        (New-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\SettingSync" "DisableSettingSync" 2),
+        (New-Reg "HKLM:\SOFTWARE\Policies\Microsoft\Windows\SettingSync" "DisableSettingSyncUserOverride" 1)))
+)
+foreach ($it in $script:ItemsPrivacidad) { $script:ItemsExtra[$it.Key] = $it }
+
+$pPriv = $script:UI.PanelPrivacidad
+$script:CasillasPriv = @()
+$script:InfoPriv = @{}
+$filaPriv = New-Object System.Windows.Controls.WrapPanel
+$filaPriv.Margin = "0,0,0,6"
+[void]$filaPriv.Children.Add((New-Boton "Marcar los verdes" { foreach ($c in $script:CasillasPriv) { $c.IsChecked = ($c.Tag.Riesgo -eq "Bajo" -and -not $script:InfoPriv[$c.Tag.Key].Hecho) } } -Libre))
+[void]$filaPriv.Children.Add((New-Boton "Marcar verdes y amarillos" { foreach ($c in $script:CasillasPriv) { $c.IsChecked = ($c.Tag.Riesgo -ne "Alto" -and -not $script:InfoPriv[$c.Tag.Key].Hecho) } } -Libre))
+[void]$filaPriv.Children.Add((New-Boton "Quitar marcas" { foreach ($c in $script:CasillasPriv) { $c.IsChecked = $false } } -Libre))
+[void]$filaPriv.Children.Add((New-Boton "Deshacer marcados" { Start-Privacidad -Deshacer $true }))
+[void]$filaPriv.Children.Add((New-Boton "Aplicar marcados" { Start-Privacidad -Deshacer $false } -Primario))
+[void]$pPriv.Children.Add($filaPriv)
+[void]$pPriv.Children.Add((New-Texto "Como O&O ShutUp10: verde se puede aplicar sin miedo, amarillo quita alguna función que quizá uses y rojo solo si sabes lo que haces. Antes de cambiar nada se guarda cómo estaba, y 'Deshacer marcados' lo deja exacto." "#6B7280" 12.5 "Normal" "0,0,0,8"))
+$nivelesPriv = @(
+    @{ Riesgo = "Bajo";  Titulo = "Verde: recomendado"; Sub = "No rompen nada; solo quitan anuncios, seguimiento y molestias." },
+    @{ Riesgo = "Medio"; Titulo = "Amarillo: con cuidado"; Sub = "Mejoran la privacidad, pero apagan alguna función de Windows. Lee el aviso de cada uno." },
+    @{ Riesgo = "Alto";  Titulo = "Rojo: solo si sabes lo que haces"; Sub = "Bloquean cosas que muchas apps necesitan (cámara, micrófono, ubicación)." }
+)
+foreach ($n in $nivelesPriv) {
+    [void]$pPriv.Children.Add((New-Titulo $n.Titulo $n.Sub))
+    foreach ($it in @($script:ItemsPrivacidad | Where-Object { $_.Riesgo -eq $n.Riesgo })) {
+        $t = New-Tarjeta -Item $it -Marcado $false
+        [void]$pPriv.Children.Add($t.Borde)
+        $script:CasillasPriv += $t.Casilla
+        $script:InfoPriv[$it.Key] = @{ Tarjeta = $t; Hecho = $false }
+    }
+}
+
+function Update-VistaPrivacidad {
+    foreach ($c in $script:CasillasPriv) {
+        $info = $script:InfoPriv[$c.Tag.Key]
+        $info.Hecho = Test-AjusteAplicado $c.Tag
+        $t = $info.Tarjeta
+        if ($info.Hecho) {
+            $t.Estado.Text = "$([char]0x2714) Ya aplicado en este equipo"
+            $t.Estado.Foreground = Get-Pincel "#1E7B3A"
+            $t.Estado.Visibility = "Visible"
+            $t.Borde.BorderBrush = Get-Pincel "#86EFAC"
+        } else {
+            $t.Estado.Visibility = "Collapsed"
+            $t.Borde.BorderBrush = Get-Pincel "#E2E6EC"
+        }
+    }
+}
+
+function Start-Privacidad([bool]$Deshacer) {
+    $sel = @($script:CasillasPriv | Where-Object { $_.IsChecked } | ForEach-Object { $_.Tag })
+    if ($Deshacer) { $sel = @($sel | Where-Object { $script:InfoPriv[$_.Key].Hecho }) } else { $sel = @($sel | Where-Object { -not $script:InfoPriv[$_.Key].Hecho }) }
+    if ($sel.Count -eq 0) {
+        $txtVacio = if ($Deshacer) { "Marca opciones que ya estén aplicadas (con $([char]0x2714)) para deshacerlas." } else { "Marca al menos una opción que aún no esté aplicada." }
+        [void][System.Windows.MessageBox]::Show($txtVacio, "Privacidad", "OK", "Information")
+        return
+    }
+    $verbo = if ($Deshacer) { "deshacer" } else { "aplicar" }
+    $msg = "Vas a $verbo $($sel.Count) opción(es) de privacidad:`r`n" + (($sel | ForEach-Object { " - $($_.Nombre)" }) -join "`r`n")
+    $rojos = @($sel | Where-Object { $_.Riesgo -eq "Alto" })
+    if ($rojos.Count -and -not $Deshacer) { $msg += "`r`n`r`nROJAS (revisa):`r`n" + (($rojos | ForEach-Object { " - $($_.Nombre): $($_.Aviso)" }) -join "`r`n") }
+    $msg += "`r`n`r`n¿Continuar?"
+    if ([System.Windows.MessageBox]::Show($msg, "Privacidad", "YesNo", $(if ($rojos.Count) { "Warning" } else { "Question" })) -ne "Yes") { return }
+    Start-Pasos -Pasos @($sel | ForEach-Object { [pscustomobject]@{ Item = $_; Deshacer = $Deshacer } }) -Titulo "Privacidad"
+}
+Update-VistaPrivacidad
+
+# ---------------------------------------------------------------- Pestaña Arranque de Windows (como Autoruns)
+$script:RutaServiciosArranque = Join-Path $env:LOCALAPPDATA "OptimizadorES\arranque-servicios.json"
+
+$script:codigoListaArranque = @'
+$lista = $global:Estado.Arranque
+$firmas = @{}
+function Get-Firma([string]$Archivo) {
+    if (-not $Archivo -or -not (Test-Path -LiteralPath $Archivo -PathType Leaf)) { return $null }
+    if ($firmas.ContainsKey($Archivo)) { return $firmas[$Archivo] }
+    $f = $null
+    try {
+        $s = Get-AuthenticodeSignature -LiteralPath $Archivo -ErrorAction Stop
+        $quien = ""
+        if ($s.SignerCertificate) { $quien = ($s.SignerCertificate.Subject -split ",")[0] -replace '^CN=', '' -replace '"', '' }
+        $f = [pscustomobject]@{ Valida = ($s.Status -eq "Valid"); Firmante = $quien }
+    } catch { }
+    $firmas[$Archivo] = $f
+    return $f
+}
+function Get-RutaExe([string]$Comando) {
+    if (-not $Comando) { return "" }
+    $c = [Environment]::ExpandEnvironmentVariables($Comando.Trim())
+    if ($c.StartsWith('"')) { $c = $c.Substring(1); $i = $c.IndexOf('"'); if ($i -gt 0) { return $c.Substring(0, $i) } }
+    if ($c -match '^(.+?\.(exe|com|bat|cmd|ps1|vbs|js|scr|dll))(\s|,|$)') { return $Matches[1] }
+    return ($c -split '\s')[0]
+}
+function Test-Aprobado([string]$Clave, [string]$Valor) {
+    try {
+        $b = (Get-ItemProperty -LiteralPath $Clave -Name $Valor -ErrorAction Stop).$Valor
+        if ($b -is [byte[]] -and $b.Length) { return (($b[0] -band 1) -eq 0) }
+    } catch { }
+    return $true
+}
+function Add-Entrada([hashtable]$Datos) {
+    $ruta = [string]$Datos.Ruta
+    $f = Get-Firma $ruta
+    $Datos.Firmante = if ($f) { $f.Firmante } else { "" }
+    $Datos.Firma = if (-not $ruta -or -not (Test-Path -LiteralPath $ruta)) { "NoExiste" } elseif (-not $f -or -not $f.Firmante) { "SinFirma" } elseif ($f.Valida) { "Valida" } else { "NoValida" }
+    [void]$lista.Add($Datos)
+}
+
+Write-Output "Leyendo los programas que arrancan con Windows..."
+$aprob = "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved"
+$fuentes = @(
+    @{ Clave = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"; Aprob = "HKCU:\$aprob\Run"; Origen = "Registro, solo tu usuario" },
+    @{ Clave = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; Aprob = "HKLM:\$aprob\Run"; Origen = "Registro, todos los usuarios" },
+    @{ Clave = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"; Aprob = "HKLM:\$aprob\Run32"; Origen = "Registro, todos los usuarios (32 bits)" }
+)
+foreach ($fu in $fuentes) {
+    if (-not (Test-Path -LiteralPath $fu.Clave)) { continue }
+    $k = Get-Item -LiteralPath $fu.Clave
+    foreach ($n in $k.GetValueNames()) {
+        if (-not $n) { continue }
+        $cmd = [string]$k.GetValue($n)
+        Add-Entrada @{ Id = "R|$($fu.Clave)|$n"; Tipo = "Programa"; Nombre = $n; Comando = $cmd; Ruta = (Get-RutaExe $cmd); Origen = $fu.Origen
+            Activo = (Test-Aprobado $fu.Aprob $n); Aprobado = $fu.Aprob; Valor = $n }
+    }
+}
+$carpetas = @(
+    @{ Ruta = [Environment]::GetFolderPath("Startup"); Aprob = "HKCU:\$aprob\StartupFolder"; Origen = "Carpeta Inicio, solo tu usuario" },
+    @{ Ruta = [Environment]::GetFolderPath("CommonStartup"); Aprob = "HKLM:\$aprob\StartupFolder"; Origen = "Carpeta Inicio, todos los usuarios" }
+)
+$shell = New-Object -ComObject WScript.Shell
+foreach ($ca in $carpetas) {
+    if (-not $ca.Ruta -or -not (Test-Path -LiteralPath $ca.Ruta)) { continue }
+    foreach ($ar in @(Get-ChildItem -LiteralPath $ca.Ruta -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne "desktop.ini" })) {
+        $destino = $ar.FullName; $cmd = $ar.FullName
+        if ($ar.Extension -eq ".lnk") {
+            try { $l = $shell.CreateShortcut($ar.FullName); if ($l.TargetPath) { $destino = $l.TargetPath; $cmd = "$($l.TargetPath) $($l.Arguments)".Trim() } } catch { }
+        }
+        Add-Entrada @{ Id = "C|$($ar.FullName)"; Tipo = "Programa"; Nombre = $ar.BaseName; Comando = $cmd; Ruta = $destino; Origen = $ca.Origen
+            Activo = (Test-Aprobado $ca.Aprob $ar.Name); Aprobado = $ca.Aprob; Valor = $ar.Name; Archivo = $ar.FullName }
+    }
+}
+
+Write-Output "Leyendo las tareas programadas que se ejecutan al encender o al iniciar sesión..."
+foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskPath -notlike "\Microsoft\*" })) {
+    $disparos = @($t.Triggers | Where-Object { $_ -and $_.CimClass.CimClassName -match "Logon|Boot" })
+    if (-not $disparos.Count) { continue }
+    $acc = @($t.Actions | Where-Object { $_.Execute })[0]
+    $exe = if ($acc) { [string]$acc.Execute } else { "" }
+    $cmd = if ($acc) { "$($acc.Execute) $($acc.Arguments)".Trim() } else { "" }
+    $cuando = if (@($disparos | Where-Object { $_.CimClass.CimClassName -match "Boot" }).Count) { "al encender" } else { "al iniciar sesión" }
+    Add-Entrada @{ Id = "T|$($t.TaskPath)$($t.TaskName)"; Tipo = "Tarea"; Nombre = $t.TaskName; Comando = $cmd; Ruta = (Get-RutaExe $exe)
+        Origen = "Tarea programada ($cuando), carpeta $($t.TaskPath)"; Activo = ([string]$t.State -ne "Disabled"); TareaRuta = $t.TaskPath; TareaNombre = $t.TaskName }
+}
+
+Write-Output "Leyendo los servicios de otros fabricantes..."
+$cambiados = @{}
+$rutaCambiados = Join-Path $env:LOCALAPPDATA "OptimizadorES\arranque-servicios.json"
+if (Test-Path -LiteralPath $rutaCambiados) {
+    try { $o = Get-Content -LiteralPath $rutaCambiados -Raw -Encoding UTF8 | ConvertFrom-Json; foreach ($pr in $o.PSObject.Properties) { $cambiados[$pr.Name] = [string]$pr.Value } } catch { }
+}
+foreach ($s in @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue)) {
+    if (-not $s.PathName -or $s.PathName -match '(?i)\\Windows\\(System32|SysWOW64|servicing|WinSxS|Microsoft\.NET)\\') { continue }
+    $esAuto = ($s.StartMode -eq "Auto")
+    if (-not $esAuto -and -not $cambiados.ContainsKey([string]$s.Name)) { continue }
+    $inicio = if ($esAuto -and $s.DelayedAutoStart) { "AutomaticDelayedStart" } elseif ($esAuto) { "Automatic" } else { [string]$s.StartMode }
+    Add-Entrada @{ Id = "S|$($s.Name)"; Tipo = "Servicio"; Nombre = [string]$s.DisplayName; Comando = [string]$s.PathName; Ruta = (Get-RutaExe ([string]$s.PathName))
+        Origen = "Servicio '$($s.Name)' ($(if ($s.State -eq 'Running') { 'funcionando' } else { 'detenido' }))"; Activo = $esAuto; Servicio = [string]$s.Name; Inicio = $inicio }
+}
+Write-Output "Arranque leído: $($lista.Count) elemento(s)."
+'@
+
+$script:PatronCritico = '(?i)SecurityHealth|Defender|ESET|egui|ekrn|Avast|AVG|Kaspersky|Norton|McAfee|Bitdefender|Sophos|Malwarebytes|Realtek|RtkAud|Synaptics|ELAN|NVIDIA|AMD|Radeon|Intel|iVMS|Hik|SmartPSS|Dahua|OneDrive|Audio|Touchpad|Bluetooth'
+
+function Start-ListaArranque {
+    if ($script:Trabajo) { return }
+    $script:ArranqueCargado = $true
+    $global:Estado.Arranque = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+    $script:PanelListaArranque.Children.Clear()
+    [void]$script:PanelListaArranque.Children.Add((New-Texto "Leyendo el arranque (unos segundos)..." "#6B7280"))
+    Start-Pasos -Pasos @(New-PasoScript -Nombre "Leer el arranque de Windows" -Codigo $script:codigoListaArranque) -Silencioso
+    if ($script:Trabajo) { $script:AlTerminar = { Show-Arranque } }
+}
+
+function Set-EntradaArranque($Entrada, [bool]$Activar, [switch]$SinHistorial) {
+    try {
+        switch ($Entrada.Tipo) {
+            "Programa" {
+                if (-not (Test-Path -LiteralPath $Entrada.Aprobado)) { New-Item -Path $Entrada.Aprobado -Force | Out-Null }
+                # El mismo valor que escribe el Administrador de tareas: 02 = activo, 03 + fecha = desactivado
+                $bytes = if ($Activar) { [byte[]](2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) } else { [byte[]](@(3, 0, 0, 0) + [BitConverter]::GetBytes([DateTime]::Now.ToFileTime())) }
+                New-ItemProperty -LiteralPath $Entrada.Aprobado -Name $Entrada.Valor -Value $bytes -PropertyType Binary -Force -ErrorAction Stop | Out-Null
+            }
+            "Tarea" {
+                if ($Activar) { Enable-ScheduledTask -TaskPath $Entrada.TareaRuta -TaskName $Entrada.TareaNombre -ErrorAction Stop | Out-Null }
+                else { Disable-ScheduledTask -TaskPath $Entrada.TareaRuta -TaskName $Entrada.TareaNombre -ErrorAction Stop | Out-Null }
+            }
+            "Servicio" {
+                $mapa = @{}
+                if (Test-Path -LiteralPath $script:RutaServiciosArranque) {
+                    try { $o = Get-Content -LiteralPath $script:RutaServiciosArranque -Raw -Encoding UTF8 | ConvertFrom-Json; foreach ($pr in $o.PSObject.Properties) { $mapa[$pr.Name] = [string]$pr.Value } } catch { }
+                }
+                if ($Activar) {
+                    $original = $mapa[$Entrada.Servicio]
+                    if (-not $original -or $original -eq "Manual") { $original = "Automatic" }
+                    if ($original -eq "AutomaticDelayedStart") { sc.exe config $Entrada.Servicio start= delayed-auto | Out-Null; if ($LASTEXITCODE) { throw "sc.exe devolvió $LASTEXITCODE" } }
+                    else { Set-Service -Name $Entrada.Servicio -StartupType $original -ErrorAction Stop }
+                    $mapa.Remove($Entrada.Servicio)
+                } else {
+                    if (-not $mapa.ContainsKey($Entrada.Servicio)) { $mapa[$Entrada.Servicio] = [string]$Entrada.Inicio }
+                    Set-Service -Name $Entrada.Servicio -StartupType Manual -ErrorAction Stop
+                }
+                New-Item -ItemType Directory -Force -Path (Split-Path $script:RutaServiciosArranque) | Out-Null
+                $mapa | ConvertTo-Json | Set-Content -LiteralPath $script:RutaServiciosArranque -Encoding UTF8
+            }
+        }
+        $Entrada.Activo = $Activar
+        $verbo = if ($Activar) { "Activado" } else { "Desactivado" }
+        Escribir-Log "Arranque: $($verbo.ToLower()) '$($Entrada.Nombre)' ($($Entrada.Origen))."
+        if (-not $SinHistorial) {
+            $datosH = @{}
+            foreach ($k in "Id", "Tipo", "Nombre", "Origen", "Aprobado", "Valor", "TareaRuta", "TareaNombre", "Servicio", "Inicio") { if ($Entrada[$k]) { $datosH[$k] = $Entrada[$k] } }
+            Add-Historial -Tipo "Arranque" -Clave $Entrada.Id -Nombre "Arranque: $($Entrada.Nombre)" -Accion $verbo -Datos $datosH
+        }
+        return $true
+    } catch {
+        Escribir-Log "No se pudo cambiar '$($Entrada.Nombre)' en el arranque: $($_.Exception.Message)" "ERROR"
+        if (-not $Prueba) { [void][System.Windows.MessageBox]::Show("No se pudo cambiar '$($Entrada.Nombre)':`r`n$($_.Exception.Message)`r`n`r`nAlgunos antivirus protegen sus propios servicios y no dejan cambiarlos.", "Arranque", "OK", "Warning") }
+        return $false
+    }
+}
+
+function Switch-EntradaArranque([string]$Id) {
+    $e = @($global:Estado.Arranque | Where-Object { $_.Id -eq $Id })[0]
+    if (-not $e) { return }
+    $activar = -not $e.Activo
+    if (-not $activar) {
+        $texto = "$($e.Nombre) $($e.Comando) $($e.Firmante)"
+        $aviso = ""
+        if ($e.Tipo -eq "Servicio") { $aviso = "Es un servicio: pasará a inicio manual (se aplica al reiniciar). Si es del antivirus, de controladores o del programa de cámaras, NO lo desactives." }
+        elseif ($texto -match $script:PatronCritico) { $aviso = "Parece de tu antivirus, de un controlador (audio, touchpad, gráficos) o del programa de cámaras. Si lo desactivas, eso puede dejar de funcionar al reiniciar." }
+        if ($aviso -and [System.Windows.MessageBox]::Show("¿Desactivar '$($e.Nombre)' del arranque?`r`n`r`n$aviso`r`n`r`nSe puede volver a activar aquí mismo o desde el Historial.", "Arranque", "YesNo", "Warning") -ne "Yes") { return }
+    }
+    if (Set-EntradaArranque $e $activar) { Show-Arranque }
+}
+
+function Show-Arranque {
+    $panel = $script:PanelListaArranque
+    $panel.Children.Clear()
+    $lista = @($global:Estado.Arranque)
+    $activos = @($lista | Where-Object { $_.Activo }).Count
+    $sinFirma = @($lista | Where-Object { $_.Activo -and $_.Firma -ne "Valida" }).Count
+    $res = "$activos de $($lista.Count) elemento(s) se ejecutan al encender."
+    if ($sinFirma) { $res += " $sinFirma activo(s) sin firma digital válida: revísalos (no siempre es malo, pero el malware casi nunca va firmado)." }
+    [void]$panel.Children.Add((New-Texto $res "#111827" 13.5 "SemiBold" "0,0,0,8"))
+    $secciones = @(
+        @{ Tipo = "Programa"; Titulo = "Programas" },
+        @{ Tipo = "Tarea"; Titulo = "Tareas programadas" },
+        @{ Tipo = "Servicio"; Titulo = "Servicios de otros fabricantes (no de Windows)" }
+    )
+    foreach ($sec in $secciones) {
+        $grupo = @($lista | Where-Object { $_.Tipo -eq $sec.Tipo } | Sort-Object @{ Expression = { -not $_.Activo } }, @{ Expression = { [string]$_.Nombre } })
+        [void]$panel.Children.Add((New-Texto "$($sec.Titulo) ($($grupo.Count))" "#374151" 14 "SemiBold" "0,10,0,6"))
+        if (-not $grupo.Count) { [void]$panel.Children.Add((New-Texto "Ninguno." "#9CA3AF" 12.5 "Normal" "0,0,0,4")); continue }
+        foreach ($e in $grupo) {
+            $marco = New-Marco -Margen "0,0,0,5" -Relleno "12,7"
+            if (-not $e.Activo) { $marco.Opacity = 0.65 }
+            $fila = New-Object System.Windows.Controls.DockPanel
+            $botones = New-Object System.Windows.Controls.StackPanel
+            $botones.Orientation = "Horizontal"
+            $botones.VerticalAlignment = "Center"
+            [System.Windows.Controls.DockPanel]::SetDock($botones, "Right")
+            $textoBoton = if ($e.Activo) { "Desactivar" } else { "Activar" }
+            [void]$botones.Children.Add((New-Boton $textoBoton ([scriptblock]::Create("Switch-EntradaArranque '$($e.Id.Replace("'", "''"))'")) -Margen "6,0,0,0" -Libre))
+            if ($e.Ruta -and (Test-Path -LiteralPath $e.Ruta)) {
+                [void]$botones.Children.Add((New-Boton "Ubicación" ([scriptblock]::Create("Start-Process explorer.exe -ArgumentList '/select,`"$($e.Ruta.Replace("'", "''"))`"'")) -Margen "6,0,0,0" -Libre))
+            }
+            [void]$fila.Children.Add($botones)
+            $pila = New-Object System.Windows.Controls.StackPanel
+            $estadoTxt = if ($e.Activo) { "$([char]0x25CF) Activo" } else { "$([char]0x25CB) Desactivado" }
+            $tit = New-Texto "$($e.Nombre)" "#111827" 13 "SemiBold"
+            [void]$pila.Children.Add($tit)
+            $firmaTxt = switch ($e.Firma) {
+                "Valida"   { "$([char]0x2714) Firmado por $($e.Firmante)" }
+                "NoValida" { "$([char]0x26A0) Firma NO válida ($($e.Firmante))" }
+                "NoExiste" { "$([char]0x26A0) El archivo ya no existe (resto de un programa borrado)" }
+                default    { "$([char]0x26A0) Sin firma digital" }
+            }
+            $colorFirma = if ($e.Firma -eq "Valida") { "#16A34A" } else { "#D97706" }
+            $lineaEstado = New-Object System.Windows.Controls.TextBlock
+            $lineaEstado.TextWrapping = "Wrap"
+            $lineaEstado.FontSize = 12
+            $lineaEstado.Margin = "0,1,0,0"
+            $r1 = New-Object System.Windows.Documents.Run "$estadoTxt   "
+            $r1.Foreground = Get-Pincel $(if ($e.Activo) { "#2563EB" } else { "#6B7280" })
+            $r1.FontWeight = "SemiBold"
+            $r2 = New-Object System.Windows.Documents.Run "$firmaTxt   "
+            $r2.Foreground = Get-Pincel $colorFirma
+            $r3 = New-Object System.Windows.Documents.Run $e.Origen
+            $r3.Foreground = Get-Pincel "#6B7280"
+            [void]$lineaEstado.Inlines.Add($r1); [void]$lineaEstado.Inlines.Add($r2); [void]$lineaEstado.Inlines.Add($r3)
+            [void]$pila.Children.Add($lineaEstado)
+            if ($e.Comando) {
+                $cmdCorto = if ($e.Comando.Length -gt 160) { $e.Comando.Substring(0, 157) + "..." } else { $e.Comando }
+                $tc = New-Texto $cmdCorto "#9CA3AF" 11 "Normal" "0,1,0,0"
+                $tc.ToolTip = $e.Comando
+                [void]$pila.Children.Add($tc)
+            }
+            [void]$fila.Children.Add($pila)
+            $marco.Child = $fila
+            [void]$panel.Children.Add($marco)
+        }
+    }
+}
+
+$pArr = $script:UI.PanelArranque
+[void]$pArr.Children.Add((New-Titulo "Arranque de Windows" "Todo lo que se abre solo al encender: programas, tareas programadas y servicios de otros fabricantes. Desactivar no borra nada y se puede volver a activar."))
+$filaArr = New-Object System.Windows.Controls.WrapPanel
+$filaArr.Margin = "0,0,0,6"
+[void]$filaArr.Children.Add((New-Boton "Volver a leer" { Start-ListaArranque } -Primario))
+[void]$filaArr.Children.Add((New-Boton "Abrir en Configuración de Windows" { Start-Process "ms-settings:startupapps" } -Libre))
+[void]$filaArr.Children.Add((New-Boton "Programador de tareas" { Start-Process "taskschd.msc" } -Libre))
+[void]$filaArr.Children.Add((New-Boton "Servicios" { Start-Process "services.msc" } -Libre))
+[void]$pArr.Children.Add($filaArr)
+[void]$pArr.Children.Add((New-Texto "Consejo: desactiva lo que no uses a diario (actualizadores, chats, lanzadores de juegos). No desactives el antivirus, los controladores de audio, touchpad o gráficos, ni el programa de cámaras en una PC de vigilancia." "#6B7280" 12.5 "Normal" "0,0,0,8"))
+$script:PanelListaArranque = New-Object System.Windows.Controls.StackPanel
+[void]$pArr.Children.Add($script:PanelListaArranque)
+[void]$script:PanelListaArranque.Children.Add((New-Texto "La lista se carga al abrir esta pestaña." "#6B7280"))
+$script:ArranqueCargado = $false
+
+# ---------------------------------------------------------------- Pestaña Mis programas: actualizaciones (winget) y desinstalar a fondo
+$script:codigoBuscarActualizaciones = @'
+$ruta = Get-RutaWinget
+if (-not $ruta) { Write-Warning "winget no está instalado. Ve a Reparaciones > 'Reparar winget'."; return }
+Write-Output "Preguntando a winget qué programas tienen una versión nueva (puede tardar un minuto)..."
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = $ruta
+$psi.Arguments = "upgrade --accept-source-agreements --disable-interactivity"
+$psi.UseShellExecute = $false
+$psi.RedirectStandardOutput = $true
+$psi.RedirectStandardError = $true
+$psi.CreateNoWindow = $true
+$psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+$proceso = [Diagnostics.Process]::Start($psi)
+$tareaError = $proceso.StandardError.ReadToEndAsync()
+$salida = $proceso.StandardOutput.ReadToEnd()
+$proceso.WaitForExit()
+$filas = ConvertFrom-TablaWinget -Texto $salida
+foreach ($f in $filas) { [void]$global:Estado.Actualizables.Add($f) }
+Write-Output "Programas con actualización: $($filas.Count)."
+'@
+
+function Start-BuscarActualizaciones {
+    if (-not $script:WingetOk) {
+        [void][System.Windows.MessageBox]::Show("winget no está instalado. Ve a Reparaciones > 'Reparar winget'.", "Mis programas", "OK", "Warning")
+        return
+    }
+    $global:Estado.Actualizables = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+    $script:PanelActualizables.Children.Clear()
+    [void]$script:PanelActualizables.Children.Add((New-Texto "Buscando actualizaciones..." "#6B7280"))
+    Start-Pasos -Pasos @(New-PasoScript -Nombre "Buscar actualizaciones de programas" -Codigo $script:codigoBuscarActualizaciones) -Silencioso
+    if ($script:Trabajo) { $script:AlTerminar = { Show-Actualizables } }
+}
+
+function Show-Actualizables {
+    $panel = $script:PanelActualizables
+    $panel.Children.Clear()
+    $script:CasillasActualizables = @()
+    $lista = @($global:Estado.Actualizables)
+    if ($lista.Count -eq 0) {
+        [void]$panel.Children.Add((New-Texto "$([char]0x2714) Todos los programas que reconoce winget están al día." "#16A34A" 13 "SemiBold" "0,0,0,6"))
+        return
+    }
+    [void]$panel.Children.Add((New-Texto "$($lista.Count) programa(s) con versión nueva. Marca los que quieras y pulsa 'Actualizar seleccionados'." "#111827" 13 "SemiBold" "0,0,0,6"))
+    foreach ($a in $lista) {
+        $marco = New-Marco -Margen "0,0,0,4" -Relleno "12,6"
+        $pila = New-Object System.Windows.Controls.StackPanel
+        $chk = New-Object System.Windows.Controls.CheckBox
+        $chk.Content = $a.Nombre
+        $chk.FontWeight = "SemiBold"
+        $chk.IsChecked = $true
+        $chk.Tag = $a
+        [void]$pila.Children.Add($chk)
+        [void]$pila.Children.Add((New-Texto "Versión $($a.Version)  $([char]0x2192)  $($a.Disponible)    ·    $($a.Id) ($($a.Origen))" "#6B7280" 12 "Normal" "20,1,0,0"))
+        $estadoTxt = New-Texto "" "#6B7280" 12 "SemiBold" "20,3,0,0"
+        $estadoTxt.Visibility = "Collapsed"
+        [void]$pila.Children.Add($estadoTxt)
+        $barraA = New-Object System.Windows.Controls.ProgressBar
+        $barraA.Height = 5
+        $barraA.Margin = "20,3,0,2"
+        $barraA.Visibility = "Collapsed"
+        [void]$pila.Children.Add($barraA)
+        $marco.Child = $pila
+        [void]$panel.Children.Add($marco)
+        $script:CasillasActualizables += $chk
+        # Así el progreso de winget se ve en esta fila
+        $script:TarjetaPorId[$a.Id] = [pscustomobject]@{ Borde = $marco; Estado = $estadoTxt; Barra = $barraA; Firma = "" }
+    }
+    $fila = New-Object System.Windows.Controls.WrapPanel
+    $fila.Margin = "0,6,0,0"
+    [void]$fila.Children.Add((New-Boton "Actualizar seleccionados" {
+        $sel = @($script:CasillasActualizables | Where-Object { $_.IsChecked } | ForEach-Object { $_.Tag })
+        if ($sel.Count -eq 0) { return }
+        $msg = "Se actualizarán $($sel.Count) programa(s) en silencio, uno tras otro.`r`n`r`nCierra esos programas antes: algunos se cierran solos al actualizarse.`r`n`r`n¿Continuar?"
+        if ([System.Windows.MessageBox]::Show($msg, "Actualizar programas", "YesNo", "Question") -ne "Yes") { return }
+        foreach ($a in $sel) { $global:Estado.Apps[$a.Id] = @{ Texto = "En espera..."; Tipo = "trabajo"; Progreso = -1 } }
+        $pasos = foreach ($a in $sel) { New-PasoScript -Nombre "Actualizar $($a.Nombre)" -Codigo ("Invoke-AppWinget -Accion 'upgrade' -Id '{0}' -Fuente '{1}'" -f $a.Id, $a.Origen) }
+        Start-Pasos -Pasos @($pasos) -Titulo "Actualizar programas"
+    } -Primario))
+    [void]$fila.Children.Add((New-Boton "Marcar todos" { foreach ($c in $script:CasillasActualizables) { $c.IsChecked = $true } } -Libre))
+    [void]$fila.Children.Add((New-Boton "Quitar marcas" { foreach ($c in $script:CasillasActualizables) { $c.IsChecked = $false } } -Libre))
+    [void]$panel.Children.Add($fila)
+}
+
+# Programas instalados (lectura del registro de desinstalación)
+function Get-ProgramasInstalados {
+    $claves = @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*")
+    $vistos = @{}
+    $res = foreach ($c in $claves) {
+        foreach ($p in @(Get-ItemProperty -Path $c -ErrorAction SilentlyContinue)) {
+            if (-not $p.DisplayName -or -not $p.UninstallString -or $p.SystemComponent -eq 1 -or $p.ParentKeyName -or $p.ReleaseType -match 'Update|Hotfix') { continue }
+            $clave = "$($p.DisplayName)|$($p.DisplayVersion)"
+            if ($vistos.ContainsKey($clave)) { continue }
+            $vistos[$clave] = $true
+            $fecha = ""
+            if ([string]$p.InstallDate -match '^(\d{4})(\d{2})(\d{2})$') { $fecha = "$($Matches[3])/$($Matches[2])/$($Matches[1])" }
+            [pscustomobject]@{
+                Nombre = [string]$p.DisplayName; Editor = [string]$p.Publisher; Version = [string]$p.DisplayVersion; Fecha = $fecha
+                MB = $(if ($p.EstimatedSize) { [math]::Round([double]$p.EstimatedSize / 1024, 0) } else { 0 })
+                Desinstalar = [string]$p.UninstallString; Ubicacion = [string]$p.InstallLocation; Clave = [string]$p.PSPath
+            }
+        }
+    }
+    return @($res | Sort-Object Nombre)
+}
+
+function Show-Instalados {
+    $script:ProgramasCargados = $true
+    $script:Instalados = Get-ProgramasInstalados
+    Update-FiltroInstalados
+}
+
+function Update-FiltroInstalados {
+    $panel = $script:PanelInstalados
+    $panel.Children.Clear()
+    $texto = ([string]$script:TxtBuscarPrograma.Text).Trim()
+    $lista = @($script:Instalados | Where-Object { -not $texto -or "$($_.Nombre) $($_.Editor)" -like "*$texto*" })
+    [void]$panel.Children.Add((New-Texto "$($lista.Count) programa(s)$(if ($texto) { " que coinciden con '$texto'" })." "#6B7280" 12.5 "Normal" "0,0,0,6"))
+    $i = 0
+    foreach ($p in $lista) {
+        $i++
+        if ($i -gt 150) { [void]$panel.Children.Add((New-Texto "... escribe en el buscador para ver el resto." "#6B7280")); break }
+        $marco = New-Marco -Margen "0,0,0,4" -Relleno "12,6"
+        $fila = New-Object System.Windows.Controls.DockPanel
+        $btn = New-Boton "Desinstalar a fondo" ([scriptblock]::Create("Start-DesinstalarFondo '$($p.Clave.Replace("'", "''"))'")) -Margen "8,0,0,0" -Libre
+        $btn.VerticalAlignment = "Center"
+        [System.Windows.Controls.DockPanel]::SetDock($btn, "Right")
+        [void]$fila.Children.Add($btn)
+        $pila = New-Object System.Windows.Controls.StackPanel
+        [void]$pila.Children.Add((New-Texto $p.Nombre "#111827" 13 "SemiBold"))
+        $datosP = @($p.Editor, $(if ($p.Version) { "versión $($p.Version)" }), $(if ($p.MB) { "$($p.MB) MB" }), $(if ($p.Fecha) { "instalado el $($p.Fecha)" })) | Where-Object { $_ }
+        [void]$pila.Children.Add((New-Texto ($datosP -join "   ·   ") "#6B7280" 12))
+        [void]$fila.Children.Add($pila)
+        $marco.Child = $fila
+        [void]$panel.Children.Add($marco)
+    }
+}
+
+function Start-DesinstalarFondo([string]$Clave) {
+    $p = @($script:Instalados | Where-Object { $_.Clave -eq $Clave })[0]
+    if (-not $p) { return }
+    if ("$($p.Nombre) $($p.Editor)" -match $script:PatronCritico) {
+        if ([System.Windows.MessageBox]::Show("'$($p.Nombre)' parece un antivirus, un controlador o el programa de cámaras. Si lo quitas, eso dejará de funcionar.`r`n`r`n¿Seguro que quieres desinstalarlo?", "Desinstalar a fondo", "YesNo", "Warning") -ne "Yes") { return }
+    }
+    $msg = "1. Se abre el desinstalador de '$($p.Nombre)': sigue sus pasos.`r`n2. Al terminar, se buscan los restos que deja (carpetas, accesos directos y claves del registro).`r`n3. Tú eliges qué restos borrar. Las carpetas van a la Papelera y del registro se guarda una copia.`r`n`r`n¿Continuar?"
+    if ([System.Windows.MessageBox]::Show($msg, "Desinstalar a fondo", "YesNo", "Question") -ne "Yes") { return }
+    $script:ProgramaQuitado = $p
+    $global:Estado.Restos = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+    $global:Estado.SigueInstalado = $false
+    $codigo = "`$cadena = '" + $p.Desinstalar.Replace("'", "''") + "'`n" +
+        "`$nombreProg = '" + $p.Nombre.Replace("'", "''") + "'`n" +
+        "`$editorProg = '" + $p.Editor.Replace("'", "''") + "'`n" +
+        "`$ubicacionProg = '" + $p.Ubicacion.Replace("'", "''") + "'`n" +
+        "`$claveProg = '" + $p.Clave.Replace("'", "''") + "'`n" + $script:codigoDesinstalar
+    Start-Pasos -Pasos @(New-PasoScript -Nombre "Desinstalar $($p.Nombre)" -Codigo $codigo) -Titulo "Desinstalar a fondo" -Silencioso
+    if ($script:Trabajo) { $script:AlTerminar = { Show-Restos; Show-Instalados } }
+}
+
+function Show-Restos {
+    $panel = $script:PanelRestos
+    $panel.Children.Clear()
+    $script:CasillasRestos = @()
+    $p = $script:ProgramaQuitado
+    $lista = @($global:Estado.Restos)
+    if ($global:Estado.SigueInstalado) {
+        [void]$panel.Children.Add((New-Texto "$([char]0x26A0) '$($p.Nombre)' sigue instalado. Si cancelaste, no pasa nada. Si el desinstalador sigue abierto, termínalo y pulsa 'Buscar restos otra vez'." "#D97706" 13 "SemiBold" "0,0,0,6"))
+    }
+    if ($lista.Count -eq 0) {
+        [void]$panel.Children.Add((New-Texto "$([char]0x2714) No quedan restos de '$($p.Nombre)'." "#16A34A" 13 "SemiBold" "0,0,0,6"))
+    } else {
+        [void]$panel.Children.Add((New-Texto "Restos de '$($p.Nombre)': marca los que quieras borrar." "#111827" 13 "SemiBold" "0,0,0,6"))
+        foreach ($r in $lista) {
+            $chk = New-Object System.Windows.Controls.CheckBox
+            $tam = if ($r.MB) { "  ($($r.MB) MB)" } else { "" }
+            $tipoTxt = @{ Carpeta = "Carpeta"; Registro = "Clave del registro"; Acceso = "Acceso directo" }[$r.Tipo]
+            $chk.Content = "${tipoTxt}: $($r.Ruta)$tam"
+            $chk.IsChecked = -not $global:Estado.SigueInstalado
+            $chk.Tag = $r
+            $chk.Margin = "0,2,0,2"
+            [void]$panel.Children.Add($chk)
+            $script:CasillasRestos += $chk
+        }
+    }
+    $fila = New-Object System.Windows.Controls.WrapPanel
+    $fila.Margin = "0,8,0,0"
+    if ($lista.Count) {
+        [void]$fila.Children.Add((New-Boton "Borrar restos marcados" {
+            $sel = @($script:CasillasRestos | Where-Object { $_.IsChecked } | ForEach-Object { $_.Tag })
+            if ($sel.Count -eq 0) { return }
+            if ([System.Windows.MessageBox]::Show("Se borrarán $($sel.Count) resto(s). Las carpetas van a la Papelera y las claves del registro se copian antes a un archivo .reg.`r`n`r`n¿Continuar?", "Borrar restos", "YesNo", "Question") -ne "Yes") { return }
+            $lineas = foreach ($r in $sel) { "@{ Tipo = '$($r.Tipo)'; Ruta = '$($r.Ruta.Replace("'", "''"))' }" }
+            $codigoBorrar = "`$restos = @(" + ($lineas -join ", ") + ")`n`$programa = '" + $script:ProgramaQuitado.Nombre.Replace("'", "''") + "'`n" + $script:codigoBorrarRestos
+            Start-Pasos -Pasos @(New-PasoScript -Nombre "Borrar restos" -Codigo $codigoBorrar) -Titulo "Borrar restos"
+            if ($script:Trabajo) { $script:AlTerminar = { $script:PanelRestos.Children.Clear(); [void]$script:PanelRestos.Children.Add((New-Texto "$([char]0x2714) Restos borrados. Las carpetas están en la Papelera por si necesitas recuperar algo." "#16A34A" 13 "SemiBold")) } }
+        } -Primario))
+    }
+    [void]$fila.Children.Add((New-Boton "Buscar restos otra vez" {
+        $p = $script:ProgramaQuitado
+        $global:Estado.Restos = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+        $global:Estado.SigueInstalado = [bool](Test-Path -LiteralPath $p.Clave)
+        foreach ($r in (Find-Restos -Nombre $p.Nombre -Editor $p.Editor -Ubicacion $p.Ubicacion)) { [void]$global:Estado.Restos.Add($r) }
+        Show-Restos
+    }))
+    [void]$panel.Children.Add($fila)
+}
+
+$script:codigoDesinstalar = @'
+Write-Output "Abriendo el desinstalador de $nombreProg... Sigue sus pasos en la ventana que aparece."
+if ($cadena -match '(?i)msiexec(\.exe)?"?\s+/[IX]\s*(\{[0-9A-F-]+\})') {
+    Start-Process -FilePath msiexec.exe -ArgumentList "/x $($Matches[2])" -Wait
+} else {
+    Start-Process -FilePath cmd.exe -ArgumentList ('/c "' + $cadena + '"') -Wait -WindowStyle Hidden
+}
+Start-Sleep -Seconds 2
+if (Test-Path -LiteralPath $claveProg) {
+    $global:Estado.SigueInstalado = $true
+    Write-Warning "El programa sigue apareciendo como instalado (quizá cancelaste o el desinstalador sigue abierto)."
+} else {
+    Add-Historial -Tipo "Desinstalar" -Clave $nombreProg -Nombre "Desinstalado: $nombreProg" -Accion "Desinstalado"
+}
+Write-Output "Buscando restos..."
+foreach ($r in (Find-Restos -Nombre $nombreProg -Editor $editorProg -Ubicacion $ubicacionProg)) { [void]$global:Estado.Restos.Add($r) }
+Write-Output "Restos encontrados: $($global:Estado.Restos.Count)."
+'@
+
+$script:codigoBorrarRestos = @'
+Add-Type -AssemblyName Microsoft.VisualBasic
+$carpetaCopia = Join-Path $env:LOCALAPPDATA ("OptimizadorES\Restos\{0:yyyyMMdd_HHmmss}" -f (Get-Date))
+New-Item -ItemType Directory -Force -Path $carpetaCopia | Out-Null
+$n = 0
+$borrados = @()
+foreach ($r in $restos) {
+    try {
+        switch ($r.Tipo) {
+            "Carpeta" { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($r.Ruta, "OnlyErrorDialogs", "SendToRecycleBin") }
+            "Acceso"  { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($r.Ruta, "OnlyErrorDialogs", "SendToRecycleBin") }
+            "Registro" {
+                $n++
+                $regRuta = $r.Ruta -replace '^HKCU:\\', 'HKCU\' -replace '^HKLM:\\', 'HKLM\'
+                reg.exe export "$regRuta" (Join-Path $carpetaCopia "clave$n.reg") /y | Out-Null
+                Remove-Item -LiteralPath $r.Ruta -Recurse -Force -ErrorAction Stop
+            }
+        }
+        $borrados += $r.Ruta
+        Write-Output "Borrado: $($r.Ruta)"
+    } catch {
+        Write-Warning "No se pudo borrar $($r.Ruta): $($_.Exception.Message)"
+    }
+}
+if ($n) { Write-Output "Copia de las claves del registro en $carpetaCopia (doble clic en un .reg para recuperarla)." }
+Add-Historial -Tipo "Restos" -Clave $programa -Nombre "Restos de $programa borrados" -Accion "Borrados" -Datos @{ Rutas = $borrados; Copia = $carpetaCopia }
+'@
+
+$pProg = $script:UI.PanelProgramas
+[void]$pProg.Children.Add((New-Titulo "Actualizaciones de programas" "Como UniGetUI: busca versión nueva de TODOS tus programas que reconoce winget, no solo los de la pestaña Apps."))
+$filaAct = New-Object System.Windows.Controls.WrapPanel
+$filaAct.Margin = "0,0,0,6"
+[void]$filaAct.Children.Add((New-Boton "Buscar actualizaciones" { Start-BuscarActualizaciones } -Primario))
+[void]$pProg.Children.Add($filaAct)
+$script:PanelActualizables = New-Object System.Windows.Controls.StackPanel
+$script:PanelActualizables.Margin = "0,0,0,10"
+[void]$pProg.Children.Add($script:PanelActualizables)
+
+[void]$pProg.Children.Add((New-Titulo "Desinstalar a fondo" "Como Revo Uninstaller: abre el desinstalador del programa y después busca las carpetas, accesos directos y claves del registro que deja olvidadas."))
+$filaBuscarProg = New-Object System.Windows.Controls.DockPanel
+$filaBuscarProg.Margin = "0,0,0,8"
+$lblProg = New-Texto "Buscar programa:" "#374151"
+$lblProg.VerticalAlignment = "Center"
+$lblProg.Margin = "0,0,8,0"
+[System.Windows.Controls.DockPanel]::SetDock($lblProg, "Left")
+[void]$filaBuscarProg.Children.Add($lblProg)
+$script:TxtBuscarPrograma = New-Object System.Windows.Controls.TextBox
+$script:TxtBuscarPrograma.Add_TextChanged({ if ($script:ProgramasCargados) { Update-FiltroInstalados } })
+[void]$filaBuscarProg.Children.Add($script:TxtBuscarPrograma)
+[void]$pProg.Children.Add($filaBuscarProg)
+$script:PanelRestos = New-Object System.Windows.Controls.StackPanel
+$script:PanelRestos.Margin = "0,0,0,8"
+[void]$pProg.Children.Add($script:PanelRestos)
+$script:PanelInstalados = New-Object System.Windows.Controls.StackPanel
+[void]$pProg.Children.Add($script:PanelInstalados)
+$script:ProgramasCargados = $false
+$script:Instalados = @()
+
+# ---------------------------------------------------------------- Rendimiento: limpieza a fondo (como BleachBit)
+$script:CategoriasLimpieza = @(
+    @{ Clave = "TempUsuario"; Nombre = "Archivos temporales de tu usuario"; Riesgo = "Bajo"; Defecto = $true; Descripcion = "Restos que dejan instaladores y programas en tu carpeta TEMP."; Aviso = "" }
+    @{ Clave = "TempWindows"; Nombre = "Archivos temporales de Windows"; Riesgo = "Bajo"; Defecto = $true; Descripcion = "La carpeta C:\Windows\Temp."; Aviso = "" }
+    @{ Clave = "Navegadores"; Nombre = "Caché de los navegadores"; Riesgo = "Bajo"; Defecto = $true; Descripcion = "Imágenes y archivos de páginas guardados por Edge, Chrome, Brave, Opera, Vivaldi y Firefox. No borra contraseñas, cookies, historial ni favoritos."; Aviso = "Cierra los navegadores antes; las páginas tardarán un poco más la primera vez." }
+    @{ Clave = "Miniaturas"; Nombre = "Miniaturas de imágenes"; Riesgo = "Bajo"; Defecto = $true; Descripcion = "La caché de vistas previas del Explorador. Se vuelve a crear sola."; Aviso = "" }
+    @{ Clave = "Errores"; Nombre = "Informes de errores y volcados de memoria"; Riesgo = "Bajo"; Defecto = $true; Descripcion = "Informes de cuelgues de programas y volcados de pantallas azules ya enviados o viejos."; Aviso = "Si un técnico está investigando pantallas azules, guárdalos antes." }
+    @{ Clave = "Registros"; Nombre = "Registros viejos de Windows"; Riesgo = "Bajo"; Defecto = $true; Descripcion = "Registros de instalación y actualizaciones de más de 7 días (CBS, DISM, Windows Update)."; Aviso = "" }
+    @{ Clave = "Actualizaciones"; Nombre = "Descargas de Windows Update"; Riesgo = "Bajo"; Defecto = $true; Descripcion = "Archivos de actualizaciones ya instaladas. Se detiene Windows Update un momento para poder borrarlos."; Aviso = "Si hay una actualización a medias, se volverá a descargar." }
+    @{ Clave = "Entrega"; Nombre = "Caché de Optimización de distribución"; Riesgo = "Bajo"; Defecto = $true; Descripcion = "Trozos de actualizaciones que Windows guarda para compartir con otros equipos."; Aviso = "" }
+    @{ Clave = "Papelera"; Nombre = "Papelera de reciclaje"; Riesgo = "Medio"; Defecto = $false; Descripcion = "Vacía la Papelera de todos los discos."; Aviso = "Lo que esté en la Papelera ya no se podrá recuperar." }
+    @{ Clave = "Componentes"; Nombre = "Versiones viejas de componentes de Windows"; Riesgo = "Medio"; Defecto = $false; Descripcion = "DISM /StartComponentCleanup: borra copias viejas que dejan las actualizaciones (suele liberar 1 a 5 GB). Tarda 5 a 20 minutos."; Aviso = "Después ya no se pueden desinstalar las actualizaciones que ya tienes." }
+    @{ Clave = "WindowsOld"; Nombre = "Windows.old (instalación anterior)"; Riesgo = "Alto"; Defecto = $false; Descripcion = "La copia de tu Windows anterior que queda tras una actualización grande o una reinstalación."; Aviso = "Ya no podrás volver a la versión anterior de Windows ni recuperar archivos de esa carpeta." }
+)
+
+$script:codigoLimpieza = @'
+$rutas = @{
+    TempUsuario = @("$env:TEMP")
+    TempWindows = @("$env:SystemRoot\Temp")
+    Navegadores = @(
+        "$env:LOCALAPPDATA\Microsoft\Edge\User Data\*\Cache", "$env:LOCALAPPDATA\Microsoft\Edge\User Data\*\Code Cache", "$env:LOCALAPPDATA\Microsoft\Edge\User Data\*\GPUCache",
+        "$env:LOCALAPPDATA\Google\Chrome\User Data\*\Cache", "$env:LOCALAPPDATA\Google\Chrome\User Data\*\Code Cache", "$env:LOCALAPPDATA\Google\Chrome\User Data\*\GPUCache",
+        "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\*\Cache", "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\*\Code Cache",
+        "$env:LOCALAPPDATA\Vivaldi\User Data\*\Cache", "$env:APPDATA\Opera Software\Opera Stable\Cache", "$env:LOCALAPPDATA\Opera Software\Opera Stable\Cache",
+        "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles\*\cache2")
+    Miniaturas = @("$env:LOCALAPPDATA\Microsoft\Windows\Explorer\thumbcache_*.db", "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\iconcache_*.db")
+    Errores = @("$env:ProgramData\Microsoft\Windows\WER\ReportArchive", "$env:ProgramData\Microsoft\Windows\WER\ReportQueue", "$env:LOCALAPPDATA\Microsoft\Windows\WER\ReportArchive",
+        "$env:LOCALAPPDATA\CrashDumps", "$env:SystemRoot\Minidump", "$env:SystemRoot\MEMORY.DMP", "$env:SystemRoot\LiveKernelReports")
+    Registros = @("$env:SystemRoot\Logs\CBS", "$env:SystemRoot\Logs\DISM", "$env:SystemRoot\Logs\WindowsUpdate", "$env:SystemRoot\Logs\MoSetup", "$env:SystemRoot\Panther\UnattendGC")
+    Actualizaciones = @("$env:SystemRoot\SoftwareDistribution\Download")
+    Entrega = @("$env:SystemRoot\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache")
+    WindowsOld = @("$env:SystemDrive\Windows.old")
+}
+$soloViejos = @{ Registros = 7 }
+
+function Get-ArchivosCategoria([string]$Clave) {
+    $dias = $soloViejos[$Clave]
+    foreach ($patron in @($rutas[$Clave])) {
+        foreach ($item in @(Get-Item -Path $patron -Force -ErrorAction SilentlyContinue)) {
+            $archivos = if ($item.PSIsContainer) { @(Get-ChildItem -LiteralPath $item.FullName -Recurse -Force -File -ErrorAction SilentlyContinue) } else { @($item) }
+            if ($dias) { $archivos = @($archivos | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$dias) -and $_.Name -notmatch '^CBS\.log$|^dism\.log$' }) }
+            $archivos
+        }
+    }
+}
+function Get-MBCategoria([string]$Clave) {
+    if ($Clave -eq "Papelera") {
+        $t = 0
+        foreach ($u in @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
+            $pap = Join-Path $u.Root '$Recycle.Bin'
+            if (Test-Path -LiteralPath $pap) { $t += (Get-ChildItem -LiteralPath $pap -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum }
+        }
+        return [math]::Round($t / 1MB, 1)
+    }
+    if ($Clave -eq "Componentes") { return -1 }
+    $suma = (@(Get-ArchivosCategoria $Clave) | Measure-Object -Property Length -Sum).Sum
+    return [math]::Round([double]$suma / 1MB, 1)
+}
+
+$total = 0
+foreach ($c in $Claves) {
+    if ($Modo -eq "Limpiar") {
+        $antesMB = Get-MBCategoria $c
+        Write-Output "Limpiando: $c..."
+        switch ($c) {
+            "Papelera" { Clear-RecycleBin -Force -ErrorAction SilentlyContinue }
+            "Componentes" {
+                Write-Output "DISM está limpiando componentes (5 a 20 minutos, no apagues el equipo)..."
+                $salidaDism = & dism.exe /Online /Cleanup-Image /StartComponentCleanup
+                if ($LASTEXITCODE -ne 0) { Write-Warning "DISM terminó con el código $LASTEXITCODE." } else { Write-Output "Componentes limpiados." }
+            }
+            "WindowsOld" {
+                $wo = "$env:SystemDrive\Windows.old"
+                if (Test-Path -LiteralPath $wo) {
+                    takeown.exe /F $wo /R /A /D Y 2>&1 | Out-Null
+                    icacls.exe $wo /grant "*S-1-5-32-544:F" /T /C /Q 2>&1 | Out-Null
+                    cmd.exe /c "rd /s /q `"$wo`"" 2>&1 | Out-Null
+                }
+            }
+            "Entrega" {
+                if (Get-Command Delete-DeliveryOptimizationCache -ErrorAction SilentlyContinue) { Delete-DeliveryOptimizationCache -Force -ErrorAction SilentlyContinue }
+                else { Get-ArchivosCategoria $c | Remove-Item -Force -ErrorAction SilentlyContinue }
+            }
+            "Actualizaciones" {
+                Stop-Service -Name wuauserv, bits -Force -ErrorAction SilentlyContinue
+                try { Get-ArchivosCategoria $c | Remove-Item -Force -ErrorAction SilentlyContinue }
+                finally { Start-Service -Name wuauserv, bits -ErrorAction SilentlyContinue }
+            }
+            default { Get-ArchivosCategoria $c | Remove-Item -Force -ErrorAction SilentlyContinue }
+        }
+        # Carpetas que quedaron vacías dentro de TEMP
+        if ($c -like "Temp*") {
+            foreach ($raiz in @($rutas[$c])) { Get-ChildItem -LiteralPath $raiz -Directory -Force -ErrorAction SilentlyContinue | Where-Object { -not (Get-ChildItem -LiteralPath $_.FullName -Recurse -Force -File -ErrorAction SilentlyContinue | Select-Object -First 1) } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+        $despuesMB = Get-MBCategoria $c
+        if ($antesMB -ge 0) {
+            $liberado = [math]::Max(0, $antesMB - $despuesMB)
+            $total += $liberado
+            Write-Output ("  {0}: liberados {1} MB" -f $c, $liberado)
+        }
+        $global:Estado.Limpieza[$c] = $despuesMB
+    } else {
+        $global:Estado.Limpieza[$c] = Get-MBCategoria $c
+    }
+}
+if ($Modo -eq "Limpiar") {
+    Write-Output ("Total liberado: {0:N1} GB. Lo que estaba en uso por algún programa se dejó (es normal)." -f ($total / 1024))
+    Add-Historial -Tipo "Limpieza" -Clave "Limpieza" -Nombre ("Limpieza a fondo: {0:N1} GB liberados" -f ($total / 1024)) -Accion "Limpiado" -Datos @{ Categorias = @($Claves) }
+} else {
+    Write-Output "Análisis del espacio terminado."
+}
+'@
+
+function Start-Limpieza([string]$Modo) {
+    $claves = if ($Modo -eq "Medir") { @($script:CategoriasLimpieza | ForEach-Object { $_.Clave }) } else { @($script:CasillasLimpieza | Where-Object { $_.IsChecked } | ForEach-Object { $_.Tag.Clave }) }
+    if ($claves.Count -eq 0) { [void][System.Windows.MessageBox]::Show("Marca al menos una categoría.", "Limpieza", "OK", "Information"); return }
+    if ($Modo -eq "Limpiar") {
+        $sel = @($script:CategoriasLimpieza | Where-Object { $claves -contains $_.Clave })
+        $msg = "Se limpiarán $($sel.Count) categoría(s):`r`n" + (($sel | ForEach-Object { " - $($_.Nombre)" }) -join "`r`n")
+        $avisos = @($sel | Where-Object { $_.Riesgo -ne "Bajo" })
+        if ($avisos.Count) { $msg += "`r`n`r`nOjo:`r`n" + (($avisos | ForEach-Object { " - $($_.Nombre): $($_.Aviso)" }) -join "`r`n") }
+        $msg += "`r`n`r`nCierra los navegadores y programas abiertos antes. ¿Continuar?"
+        if ([System.Windows.MessageBox]::Show($msg, "Limpieza a fondo", "YesNo", $(if ($avisos.Count) { "Warning" } else { "Question" })) -ne "Yes") { return }
+    }
+    $global:Estado.Limpieza = [hashtable]::Synchronized(@{})
+    $codigo = "`$Modo = '$Modo'`n`$Claves = @(" + (($claves | ForEach-Object { "'$_'" }) -join ",") + ")`n" + $script:codigoLimpieza
+    $nombrePaso = if ($Modo -eq "Medir") { "Analizar espacio recuperable" } else { "Limpieza a fondo" }
+    if ($Modo -eq "Medir") { Start-Pasos -Pasos @(New-PasoScript -Nombre $nombrePaso -Codigo $codigo) -Silencioso }
+    else { Start-Pasos -Pasos @(New-PasoScript -Nombre $nombrePaso -Codigo $codigo) -Titulo $nombrePaso }
+    if ($script:Trabajo) { $script:AlTerminar = { Show-Limpieza } }
+}
+
+function Show-Limpieza {
+    $total = 0
+    foreach ($c in $script:CasillasLimpieza) {
+        $cat = $c.Tag
+        $mb = $global:Estado.Limpieza[$cat.Clave]
+        if ($null -eq $mb) { continue }
+        $txt = if ($mb -lt 0) { "tamaño variable" } elseif ($mb -ge 1024) { "{0:N1} GB" -f ($mb / 1024) } else { "{0:N0} MB" -f $mb }
+        $c.Content = "$($cat.Nombre)   ($txt)"
+        if ($mb -gt 0) { $total += $mb }
+    }
+    $script:TxtTotalLimpieza.Text = "Se pueden recuperar unos {0:N1} GB (sin contar los componentes de Windows)." -f ($total / 1024)
+}
+
+$pR = $script:UI.PanelRendimiento
+[void]$pR.Children.Add((New-Titulo "Limpieza a fondo" "Como BleachBit: primero mide cuánto ocupa cada cosa y luego limpias solo lo que marques."))
+$filaLimp = New-Object System.Windows.Controls.WrapPanel
+$filaLimp.Margin = "0,0,0,6"
+[void]$filaLimp.Children.Add((New-Boton "Medir espacio" { Start-Limpieza "Medir" }))
+[void]$filaLimp.Children.Add((New-Boton "Limpiar marcados" { Start-Limpieza "Limpiar" } -Primario))
+[void]$pR.Children.Add($filaLimp)
+$script:TxtTotalLimpieza = New-Texto "Pulsa 'Medir espacio' para ver cuánto puedes liberar." "#1D4ED8" 13 "SemiBold" "0,0,0,8"
+[void]$pR.Children.Add($script:TxtTotalLimpieza)
+$script:CasillasLimpieza = @()
+foreach ($cat in $script:CategoriasLimpieza) {
+    $it = [pscustomobject]@{ Nombre = $cat.Nombre; Descripcion = $cat.Descripcion; Riesgo = $cat.Riesgo; Aviso = $cat.Aviso }
+    $t = New-Tarjeta -Item $it -Marcado $cat.Defecto
+    $t.Casilla.Tag = $cat
+    [void]$pR.Children.Add($t.Borde)
+    $script:CasillasLimpieza += $t.Casilla
+}
+
+# ---------------------------------------------------------------- Rendimiento: salud de discos y batería
+$script:codigoDiscos = @'
+$lista = $global:Estado.Discos
+$avisoSmart = $false
+try { $avisoSmart = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictStatus -ErrorAction Stop | Where-Object { $_.PredictFailure }).Count -gt 0 } catch { }
+foreach ($d in @(Get-PhysicalDisk -ErrorAction SilentlyContinue | Sort-Object DeviceId)) {
+    $c = $null
+    try { $c = $d | Get-StorageReliabilityCounter -ErrorAction Stop } catch { }
+    $tipo = switch ([string]$d.MediaType) { "SSD" { "SSD" } "HDD" { "Disco duro (HDD)" } default { "Disco" } }
+    if ([string]$d.BusType -eq "NVMe") { $tipo = "SSD NVMe" }
+    [void]$lista.Add(@{
+        Nombre = [string]$d.FriendlyName; Tipo = $tipo; GB = [math]::Round([double]$d.Size / 1GB, 0)
+        Salud = [string]$d.HealthStatus; Estado = [string]($d.OperationalStatus -join ", ")
+        Temperatura = $(if ($c -and $c.Temperature) { [int]$c.Temperature } else { $null })
+        Desgaste = $(if ($c -and $null -ne $c.Wear) { [int]$c.Wear } else { $null })
+        Horas = $(if ($c -and $c.PowerOnHours) { [int]$c.PowerOnHours } else { $null })
+        ErroresLectura = $(if ($c) { [int]$c.ReadErrorsUncorrected } else { 0 })
+        ErroresEscritura = $(if ($c) { [int]$c.WriteErrorsUncorrected } else { 0 })
+    })
+}
+$global:Estado.AvisoSmart = $avisoSmart
+try {
+    $llena = (Get-CimInstance -Namespace root\wmi -ClassName BatteryFullChargedCapacity -ErrorAction Stop | Select-Object -First 1).FullChargedCapacity
+    $diseno = (Get-CimInstance -Namespace root\wmi -ClassName BatteryStaticData -ErrorAction Stop | Select-Object -First 1).DesignedCapacity
+    $ciclos = $null
+    try { $ciclos = (Get-CimInstance -Namespace root\wmi -ClassName BatteryCycleCount -ErrorAction Stop | Select-Object -First 1).CycleCount } catch { }
+    if ($llena -and $diseno) { $global:Estado.Bateria = @{ Salud = [int](100 * $llena / $diseno); Ciclos = $ciclos } }
+} catch { }
+Write-Output "Salud de discos revisada: $($lista.Count) disco(s)."
+'@
+
+function Start-SaludDiscos {
+    if ($script:Trabajo) { return }
+    $global:Estado.Discos = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+    $global:Estado.Bateria = $null
+    $global:Estado.AvisoSmart = $false
+    $script:PanelDiscos.Children.Clear()
+    [void]$script:PanelDiscos.Children.Add((New-Texto "Revisando los discos..." "#6B7280"))
+    Start-Pasos -Pasos @(New-PasoScript -Nombre "Revisar la salud de los discos" -Codigo $script:codigoDiscos) -Silencioso
+    if ($script:Trabajo) { $script:AlTerminar = { Show-SaludDiscos } }
+}
+
+function Show-SaludDiscos {
+    $panel = $script:PanelDiscos
+    $panel.Children.Clear()
+    foreach ($d in @($global:Estado.Discos)) {
+        $problemas = @()
+        if ($d.Salud -eq "Unhealthy") { $problemas += "Windows lo marca como DAÑADO." }
+        elseif ($d.Salud -eq "Warning") { $problemas += "Windows avisa de que empieza a fallar." }
+        if ($d.Desgaste -ge 90) { $problemas += "Desgaste del $($d.Desgaste) %: está al final de su vida." } elseif ($d.Desgaste -ge 70) { $problemas += "Desgaste del $($d.Desgaste) %." }
+        if ($d.ErroresLectura -gt 0 -or $d.ErroresEscritura -gt 0) { $problemas += "Tiene $($d.ErroresLectura + $d.ErroresEscritura) error(es) de lectura/escritura sin corregir." }
+        if ($d.Temperatura -ge 60) { $problemas += "Temperatura alta: $($d.Temperatura) °C." }
+        $grave = ($d.Salud -eq "Unhealthy" -or $d.Desgaste -ge 90 -or ($d.ErroresLectura + $d.ErroresEscritura) -gt 0)
+        $colorBorde = if ($grave) { "#DC2626" } elseif ($problemas.Count) { "#D97706" } else { "#16A34A" }
+        $marco = New-Marco -Borde $colorBorde
+        $marco.BorderThickness = "4,1,1,1"
+        $pila = New-Object System.Windows.Controls.StackPanel
+        $icono = if ($grave) { [char]0x2716 } elseif ($problemas.Count) { [char]0x26A0 } else { [char]0x2714 }
+        [void]$pila.Children.Add((New-Texto "$icono $($d.Nombre)   ($($d.Tipo), $($d.GB) GB)" "#111827" 13.5 "SemiBold"))
+        $datosD = @()
+        $datosD += "Salud: " + $(switch ($d.Salud) { "Healthy" { "bien" } "Warning" { "con avisos" } "Unhealthy" { "MAL" } default { $d.Salud } })
+        if ($null -ne $d.Temperatura) { $datosD += "temperatura $($d.Temperatura) °C" }
+        if ($null -ne $d.Desgaste) { $datosD += "desgaste $($d.Desgaste) %" }
+        if ($null -ne $d.Horas) { $datosD += "encendido $([math]::Round($d.Horas / 24)) días en total" }
+        [void]$pila.Children.Add((New-Texto ($datosD -join "   ·   ") "#4B5563" 12.5 "Normal" "20,2,0,0"))
+        if ($problemas.Count) {
+            $consejo = if ($grave) { "Haz copia de tus archivos YA y cambia este disco. En una PC de cámaras, las grabaciones pueden perderse o cortarse." } else { "Vigílalo y ten copia de lo importante." }
+            [void]$pila.Children.Add((New-Texto (($problemas -join " ") + " " + $consejo) $colorBorde 12.5 "SemiBold" "20,3,0,0"))
+        }
+        $marco.Child = $pila
+        [void]$panel.Children.Add($marco)
+    }
+    if (@($global:Estado.Discos).Count -eq 0) { [void]$panel.Children.Add((New-Texto "Windows no dio información de los discos en este equipo." "#6B7280")) }
+    if ($global:Estado.AvisoSmart) { [void]$panel.Children.Add((New-Texto "$([char]0x2716) La autoprueba SMART de un disco avisa de un fallo próximo. Haz copia de seguridad cuanto antes." "#DC2626" 13 "SemiBold" "0,4,0,6")) }
+    $bat = $global:Estado.Bateria
+    if ($bat) {
+        $colorBat = if ($bat.Salud -lt 60) { "#DC2626" } elseif ($bat.Salud -lt 80) { "#D97706" } else { "#16A34A" }
+        $textoBat = "Batería: conserva el $($bat.Salud) % de su capacidad original" + $(if ($bat.Ciclos) { " ($($bat.Ciclos) ciclos de carga)" } else { "" }) + "." +
+            $(if ($bat.Salud -lt 60) { " Conviene cambiarla." } elseif ($bat.Salud -lt 80) { " Desgaste normal por uso." } else { " Está bien." })
+        [void]$panel.Children.Add((New-Texto $textoBat $colorBat 13 "SemiBold" "0,6,0,4"))
+    }
+}
+
+[void]$pR.Children.Add((New-Titulo "Salud de discos y batería" "Lee el estado que informan los propios discos (SMART): temperatura, desgaste y errores. Avisa antes de que un disco falle."))
+$filaDis = New-Object System.Windows.Controls.WrapPanel
+$filaDis.Margin = "0,0,0,6"
+[void]$filaDis.Children.Add((New-Boton "Revisar discos" { Start-SaludDiscos } -Primario))
+[void]$filaDis.Children.Add((New-Boton "Informe de batería" { Start-Pasos -Pasos @(New-PasoScript -Nombre "Informe de batería" -Codigo $script:codigoBateria) }))
+[void]$pR.Children.Add($filaDis)
+$script:PanelDiscos = New-Object System.Windows.Controls.StackPanel
+$script:PanelDiscos.Margin = "0,0,0,8"
+[void]$pR.Children.Add($script:PanelDiscos)
+
+# ---------------------------------------------------------------- Rendimiento: prioridad de programas (como Process Lasso)
+$script:RutaIFEO = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
+# Ojo: con [ordered] y claves numéricas, $d[3] sería la posición 3, no la clave 3; por eso el orden va en una lista aparte
+$script:OrdenPrioridades = @(3, 6, 2, 5, 1)
+$script:Prioridades = @{ 3 = "Alta"; 6 = "Por encima de lo normal"; 2 = "Normal"; 5 = "Por debajo de lo normal"; 1 = "Baja" }
+$script:ClasesPrioridad = @{ 3 = "High"; 6 = "AboveNormal"; 2 = "Normal"; 5 = "BelowNormal"; 1 = "Idle" }
+
+function Get-ReglasPrioridad {
+    $reglas = @()
+    foreach ($k in @(Get-ChildItem -LiteralPath $script:RutaIFEO -ErrorAction SilentlyContinue)) {
+        $po = Join-Path $k.PSPath "PerfOptions"
+        if (-not (Test-Path -LiteralPath $po)) { continue }
+        $v = (Get-ItemProperty -LiteralPath $po -Name CpuPriorityClass -ErrorAction SilentlyContinue).CpuPriorityClass
+        if ($null -ne $v) { $reglas += [pscustomobject]@{ Exe = $k.PSChildName; Valor = [int]$v } }
+    }
+    return @($reglas | Sort-Object Exe)
+}
+
+function Set-ReglaPrioridad([string]$Exe, [int]$Valor, [switch]$SinHistorial) {
+    if ($Exe -notmatch '^[^\\/:*?"<>|]+\.exe$') { throw "Escribe el nombre del programa terminado en .exe (por ejemplo: chrome.exe)." }
+    $po = Join-Path (Join-Path $script:RutaIFEO $Exe) "PerfOptions"
+    $anterior = (Get-ItemProperty -LiteralPath $po -Name CpuPriorityClass -ErrorAction SilentlyContinue).CpuPriorityClass
+    if (-not (Test-Path -LiteralPath $po)) { New-Item -Path $po -Force | Out-Null }
+    New-ItemProperty -LiteralPath $po -Name CpuPriorityClass -Value $Valor -PropertyType DWord -Force | Out-Null
+    # Los que ya están abiertos también se cambian ahora
+    $n = 0
+    foreach ($pr in @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($Exe)) -ErrorAction SilentlyContinue)) {
+        try { $pr.PriorityClass = $script:ClasesPrioridad[$Valor]; $n++ } catch { }
+    }
+    Escribir-Log "Prioridad de ${Exe}: $($script:Prioridades[$Valor]) (aplicada ya a $n proceso(s) abiertos y siempre que se abra)."
+    if (-not $SinHistorial) { Add-Historial -Tipo "Prioridad" -Clave $Exe -Nombre "Prioridad $($script:Prioridades[$Valor]) para $Exe" -Accion "Añadida" -Datos @{ Exe = $Exe; Valor = $Valor; Anterior = $anterior } }
+}
+
+function Remove-ReglaPrioridad([string]$Exe, [switch]$SinHistorial) {
+    $clave = Join-Path $script:RutaIFEO $Exe
+    $po = Join-Path $clave "PerfOptions"
+    $anterior = (Get-ItemProperty -LiteralPath $po -Name CpuPriorityClass -ErrorAction SilentlyContinue).CpuPriorityClass
+    Remove-ItemProperty -LiteralPath $po -Name CpuPriorityClass -ErrorAction SilentlyContinue
+    # Solo se borran las claves si quedaron vacías (pueden tener otros ajustes)
+    $k = Get-Item -LiteralPath $po -ErrorAction SilentlyContinue
+    if ($k -and $k.ValueCount -eq 0 -and $k.SubKeyCount -eq 0) { Remove-Item -LiteralPath $po -Force -ErrorAction SilentlyContinue }
+    $k2 = Get-Item -LiteralPath $clave -ErrorAction SilentlyContinue
+    if ($k2 -and $k2.ValueCount -eq 0 -and $k2.SubKeyCount -eq 0) { Remove-Item -LiteralPath $clave -Force -ErrorAction SilentlyContinue }
+    foreach ($pr in @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($Exe)) -ErrorAction SilentlyContinue)) { try { $pr.PriorityClass = "Normal" } catch { } }
+    Escribir-Log "Prioridad de ${Exe}: vuelve a la normal."
+    if (-not $SinHistorial -and $null -ne $anterior) { Add-Historial -Tipo "Prioridad" -Clave $Exe -Nombre "Quitada la prioridad fija de $Exe" -Accion "Quitada" -Datos @{ Exe = $Exe; Valor = [int]$anterior } }
+}
+
+function Show-ReglasPrioridad {
+    $panel = $script:PanelReglas
+    $panel.Children.Clear()
+    $reglas = Get-ReglasPrioridad
+    if (-not $reglas.Count) { [void]$panel.Children.Add((New-Texto "Aún no hay programas con prioridad fija." "#6B7280" 12.5 "Normal" "0,0,0,4")); return }
+    foreach ($r in $reglas) {
+        $marco = New-Marco -Margen "0,0,0,4" -Relleno "12,6"
+        $fila = New-Object System.Windows.Controls.DockPanel
+        $b = New-Boton "Quitar" ([scriptblock]::Create("Remove-ReglaPrioridad '$($r.Exe.Replace("'", "''"))'; Show-ReglasPrioridad")) -Margen "8,0,0,0" -Libre
+        [System.Windows.Controls.DockPanel]::SetDock($b, "Right")
+        [void]$fila.Children.Add($b)
+        $nombrePrio = $script:Prioridades[$r.Valor]
+        if (-not $nombrePrio) { $nombrePrio = "valor $($r.Valor)" }
+        $txt = New-Texto "$($r.Exe)   $([char]0x2192)   $nombrePrio" "#111827" 13 "SemiBold"
+        $txt.VerticalAlignment = "Center"
+        [void]$fila.Children.Add($txt)
+        $marco.Child = $fila
+        [void]$panel.Children.Add($marco)
+    }
+}
+
+[void]$pR.Children.Add((New-Titulo "Prioridad de programas" "Como Process Lasso: elige qué programas reciben más procesador. Windows lo aplica solo cada vez que se abren, sin dejar nada corriendo."))
+$filaPrio = New-Object System.Windows.Controls.WrapPanel
+$filaPrio.Margin = "0,0,0,6"
+$script:CmbExe = New-Object System.Windows.Controls.ComboBox
+$script:CmbExe.IsEditable = $true
+$script:CmbExe.Width = 260
+$script:CmbExe.Margin = "0,0,8,6"
+$script:CmbExe.ToolTip = "Elige un programa abierto o escribe su nombre (por ejemplo: iVMS-4200.Framework.C.exe)"
+$script:CmbExe.Add_DropDownOpened({
+    $actual = $script:CmbExe.Text
+    $script:CmbExe.Items.Clear()
+    foreach ($n in @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ne 0 -and $_.MainWindowHandle -ne 0 -or $_.ProcessName -match $script:PatronCamaras } | ForEach-Object { "$($_.ProcessName).exe" } | Sort-Object -Unique)) { [void]$script:CmbExe.Items.Add($n) }
+    $script:CmbExe.Text = $actual
+})
+[void]$filaPrio.Children.Add($script:CmbExe)
+$script:CmbPrio = New-Object System.Windows.Controls.ComboBox
+$script:CmbPrio.Width = 200
+$script:CmbPrio.Margin = "0,0,8,6"
+foreach ($k in $script:OrdenPrioridades) { [void]$script:CmbPrio.Items.Add($script:Prioridades[$k]) }
+$script:CmbPrio.SelectedIndex = 1
+[void]$filaPrio.Children.Add($script:CmbPrio)
+[void]$filaPrio.Children.Add((New-Boton "Añadir regla" {
+    $exe = ([string]$script:CmbExe.Text).Trim()
+    if ($exe -and $exe -notmatch '\.exe$') { $exe += ".exe" }
+    $valor = $script:OrdenPrioridades[$script:CmbPrio.SelectedIndex]
+    if ($valor -eq 3 -and [System.Windows.MessageBox]::Show("Prioridad 'Alta' para $exe.`r`n`r`nSi ese programa usa mucho procesador, el resto de Windows (ratón, sonido) puede ir a tirones. Para la mayoría basta 'Por encima de lo normal'.`r`n`r`n¿Usar 'Alta' igualmente?", "Prioridad", "YesNo", "Warning") -ne "Yes") { return }
+    try { Set-ReglaPrioridad $exe $valor; Show-ReglasPrioridad }
+    catch { [void][System.Windows.MessageBox]::Show($_.Exception.Message, "Prioridad", "OK", "Warning") }
+} -Primario -Libre))
+[void]$pR.Children.Add($filaPrio)
+[void]$pR.Children.Add((New-Texto "Nunca pongas en 'Baja' el antivirus ni programas del sistema. 'Tiempo real' no se ofrece a propósito: puede congelar el equipo." "#6B7280" 12.5 "Normal" "0,0,0,6"))
+$script:PanelReglas = New-Object System.Windows.Controls.StackPanel
+$script:PanelReglas.Margin = "0,0,0,8"
+[void]$pR.Children.Add($script:PanelReglas)
+Show-ReglasPrioridad
+
+# ---------------------------------------------------------------- Pestaña Historial de cambios
+$script:TextosAccion = @{
+    Aplicado = @{ Color = "#16A34A"; Boton = "Deshacer" }; Deshecho = @{ Color = "#6B7280"; Boton = "Volver a aplicar" }
+    Desactivado = @{ Color = "#D97706"; Boton = "Volver a activar" }; Activado = @{ Color = "#16A34A"; Boton = "Desactivar otra vez" }
+    "Añadida" = @{ Color = "#2563EB"; Boton = "Quitar" }; Quitada = @{ Color = "#6B7280"; Boton = "Volver a poner" }
+    Limpiado = @{ Color = "#2563EB"; Boton = "" }; Borrados = @{ Color = "#2563EB"; Boton = "" }; Desinstalado = @{ Color = "#2563EB"; Boton = "" }
+}
+
+function Read-Historial {
+    $ruta = Get-RutaHistorial
+    if (-not (Test-Path -LiteralPath $ruta)) { return @() }
+    $res = foreach ($l in @(Get-Content -LiteralPath $ruta -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+        if ($l -and $l.Trim()) { try { $l | ConvertFrom-Json } catch { } }
+    }
+    return @($res)
+}
+
+function Show-Historial {
+    $panel = $script:PanelHistorial
+    $panel.Children.Clear()
+    $todos = Read-Historial
+    if ($todos.Count -eq 0) {
+        [void]$panel.Children.Add((New-Texto "Todavía no hay cambios anotados. Aquí aparecerá cada ajuste, perfil, cambio del arranque, prioridad y limpieza que hagas con el optimizador." "#6B7280"))
+        return
+    }
+    # Solo la última anotación de cada cosa se puede deshacer (las anteriores ya no reflejan cómo está)
+    $ultima = @{}
+    for ($i = 0; $i -lt $todos.Count; $i++) { $ultima["$($todos[$i].Tipo)|$($todos[$i].Clave)"] = $i }
+    [void]$panel.Children.Add((New-Texto "$($todos.Count) cambio(s) anotados. Los más recientes primero." "#6B7280" 12.5 "Normal" "0,0,0,6"))
+    $mostrados = 0
+    for ($i = $todos.Count - 1; $i -ge 0 -and $mostrados -lt 250; $i--) {
+        $mostrados++
+        $h = $todos[$i]
+        $marco = New-Marco -Margen "0,0,0,4" -Relleno "12,6"
+        $fila = New-Object System.Windows.Controls.DockPanel
+        $info = $script:TextosAccion[[string]$h.Accion]
+        $puede = ($ultima["$($h.Tipo)|$($h.Clave)"] -eq $i) -and @("Ajuste", "Arranque", "Prioridad") -contains [string]$h.Tipo -and $info -and $info.Boton
+        if ($puede) {
+            $b = New-Boton $info.Boton ([scriptblock]::Create("Invoke-DeshacerHistorial $i")) -Margen "8,0,0,0" -Libre
+            $b.VerticalAlignment = "Center"
+            [System.Windows.Controls.DockPanel]::SetDock($b, "Right")
+            [void]$fila.Children.Add($b)
+        }
+        $pila = New-Object System.Windows.Controls.StackPanel
+        [void]$pila.Children.Add((New-Texto ([string]$h.Nombre) "#111827" 13 "SemiBold"))
+        $fecha = try { ([datetime]$h.Fecha).ToString("dd/MM/yyyy HH:mm") } catch { [string]$h.Fecha }
+        $linea = New-Object System.Windows.Controls.TextBlock
+        $linea.FontSize = 12
+        $r1 = New-Object System.Windows.Documents.Run "$($h.Accion)   "
+        $r1.Foreground = Get-Pincel $(if ($info) { $info.Color } else { "#6B7280" })
+        $r1.FontWeight = "SemiBold"
+        $r2 = New-Object System.Windows.Documents.Run $fecha
+        $r2.Foreground = Get-Pincel "#6B7280"
+        [void]$linea.Inlines.Add($r1); [void]$linea.Inlines.Add($r2)
+        if ([string]$h.Tipo -eq "Restos" -and $h.Datos.Copia) {
+            $r3 = New-Object System.Windows.Documents.Run "   ·   carpetas en la Papelera, copia del registro en $($h.Datos.Copia)"
+            $r3.Foreground = Get-Pincel "#9CA3AF"
+            [void]$linea.Inlines.Add($r3)
+        }
+        [void]$pila.Children.Add($linea)
+        [void]$fila.Children.Add($pila)
+        $marco.Child = $fila
+        [void]$panel.Children.Add($marco)
+    }
+}
+
+function Invoke-DeshacerHistorial([int]$Indice) {
+    $todos = Read-Historial
+    if ($Indice -ge $todos.Count) { return }
+    $h = $todos[$Indice]
+    switch ([string]$h.Tipo) {
+        "Ajuste" {
+            $it = Get-ItemPorClave ([string]$h.Clave)
+            if (-not $it) { [void][System.Windows.MessageBox]::Show("Este ajuste ya no existe en esta versión del optimizador.", "Historial", "OK", "Information"); return }
+            $deshacer = ([string]$h.Accion -eq "Aplicado")
+            $verbo = if ($deshacer) { "deshacer" } else { "volver a aplicar" }
+            if ([System.Windows.MessageBox]::Show("¿$($verbo.Substring(0,1).ToUpper())$($verbo.Substring(1)) '$($it.Nombre)'?", "Historial", "YesNo", "Question") -ne "Yes") { return }
+            Start-Pasos -Pasos @([pscustomobject]@{ Item = $it; Deshacer = $deshacer }) -Titulo "Historial: $verbo" -OfrecerReinicio
+        }
+        "Arranque" {
+            $ent = @{}
+            foreach ($pr in $h.Datos.PSObject.Properties) { $ent[$pr.Name] = $pr.Value }
+            $activar = ([string]$h.Accion -eq "Desactivado")
+            if (Set-EntradaArranque $ent $activar) {
+                $enLista = if ($global:Estado.Arranque) { @($global:Estado.Arranque | Where-Object { $_.Id -eq $ent.Id })[0] } else { $null }
+                if ($enLista) { $enLista.Activo = $activar; Show-Arranque }
+                Show-Historial
+            }
+        }
+        "Prioridad" {
+            try {
+                $exe = [string]$h.Datos.Exe
+                if ([string]$h.Accion -eq "Añadida") {
+                    if ($null -ne $h.Datos.Anterior) { Set-ReglaPrioridad $exe ([int]$h.Datos.Anterior) } else { Remove-ReglaPrioridad $exe }
+                } else {
+                    Set-ReglaPrioridad $exe ([int]$h.Datos.Valor)
+                }
+                Show-ReglasPrioridad
+                Show-Historial
+            } catch { [void][System.Windows.MessageBox]::Show($_.Exception.Message, "Historial", "OK", "Warning") }
+        }
+    }
+}
+
+$pHist = $script:UI.PanelHistorial
+[void]$pHist.Children.Add((New-Titulo "Historial de cambios" "Todo lo que cambiaste con el optimizador, con fecha. Lo último de cada cosa tiene un botón para deshacerlo."))
+$filaHist = New-Object System.Windows.Controls.WrapPanel
+$filaHist.Margin = "0,0,0,8"
+[void]$filaHist.Children.Add((New-Boton "Actualizar" { Show-Historial } -Libre))
+[void]$filaHist.Children.Add((New-Boton "Abrir el archivo" {
+    $ruta = Get-RutaHistorial
+    if (Test-Path -LiteralPath $ruta) { Start-Process notepad.exe -ArgumentList "`"$ruta`"" }
+} -Libre))
+[void]$filaHist.Children.Add((New-Boton "Vaciar historial" {
+    if ([System.Windows.MessageBox]::Show("Se borra solo esta lista; los cambios hechos en Windows se quedan como están y se pueden seguir deshaciendo desde cada pestaña.`r`n`r`n¿Vaciar el historial?", "Historial", "YesNo", "Question") -ne "Yes") { return }
+    Remove-Item -LiteralPath (Get-RutaHistorial) -Force -ErrorAction SilentlyContinue
+    Show-Historial
+}))
+[void]$pHist.Children.Add($filaHist)
+$script:PanelHistorial = New-Object System.Windows.Controls.StackPanel
+[void]$pHist.Children.Add($script:PanelHistorial)
+
+# ---------------------------------------------------------------- Configuración: apariencia y tu configuración
+function Switch-Tema {
+    if ($script:Trabajo) {
+        [void][System.Windows.MessageBox]::Show("Espera a que termine el trabajo en curso.", "Modo oscuro", "OK", "Information")
+        if ($script:ChkOscuro) { $script:ChkOscuro.IsChecked = $script:Oscuro }
+        return
+    }
+    $script:Prefs.Tema = if ($script:Oscuro) { "Claro" } else { "Oscuro" }
+    $script:Prefs.AbrirEn = [string]$script:UI.Pestanas.SelectedItem.Name
+    Save-Prefs
+    if (-not $script:RutaScript -or -not (Test-Path -LiteralPath $script:RutaScript)) {
+        [void][System.Windows.MessageBox]::Show("Se verá así la próxima vez que abras el optimizador.", "Modo oscuro", "OK", "Information")
+        return
+    }
+    Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", "`"$($script:RutaScript)`"")
+    $script:Ventana.Close()
+}
+$script:UI.BtnTema.Content = if ($script:Oscuro) { "$([char]0x2600)  Modo claro" } else { "$([char]0x263E)  Modo oscuro" }
+$script:UI.BtnTema.Add_Click({ Switch-Tema })
+
+$pC = $script:UI.PanelConfig
+[void]$pC.Children.Add((New-Titulo "Apariencia y comodidad" "Cómo se ve y se abre el optimizador."))
+$script:ChkOscuro = New-Object System.Windows.Controls.CheckBox
+$script:ChkOscuro.Content = "Modo oscuro (el optimizador se vuelve a abrir para aplicarlo)"
+$script:ChkOscuro.IsChecked = $script:Oscuro
+$script:ChkOscuro.Margin = "0,0,0,6"
+$script:ChkOscuro.Add_Click({ Switch-Tema })
+[void]$pC.Children.Add($script:ChkOscuro)
+$script:ChkRecordar = New-Object System.Windows.Controls.CheckBox
+$script:ChkRecordar.Content = "Abrir en la última pestaña que usé (si no, siempre abre en Inicio)"
+$script:ChkRecordar.IsChecked = [bool]$script:Prefs.RecordarPestana
+$script:ChkRecordar.Margin = "0,0,0,10"
+$script:ChkRecordar.Add_Click({
+    $script:Prefs.RecordarPestana = [bool]$script:ChkRecordar.IsChecked
+    $script:Prefs.UltimaPestana = [string]$script:UI.Pestanas.SelectedItem.Name
+    Save-Prefs
+})
+[void]$pC.Children.Add($script:ChkRecordar)
+
+[void]$pC.Children.Add((New-Titulo "Tu configuración del optimizador" "Guarda en un archivo lo que tienes marcado (ajustes, preferencias, apps y privacidad), tus reglas de prioridad y el tema, para repetirlo en otra PC."))
+$filaCfg = New-Object System.Windows.Controls.WrapPanel
+[void]$filaCfg.Children.Add((New-Boton "Exportar configuración" { $script:UI.BtnExportar.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Button]::ClickEvent))) } -Libre))
+[void]$filaCfg.Children.Add((New-Boton "Importar configuración" { $script:UI.BtnImportar.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Button]::ClickEvent))) } -Libre))
+[void]$pC.Children.Add($filaCfg)
+
+# ---------------------------------------------------------------- Enganches con el resto del optimizador
+function Update-VistasExtra {
+    Update-VistaPrivacidad
+    if ($script:PerfilesVistos) { Update-EstadoPerfiles }
+    if ([string]$script:UI.Pestanas.SelectedItem.Name -eq "TabHistorial") { Show-Historial }
+}
+
+function Invoke-ComprobacionExtra([string]$Sel) {
+    if ($script:AnalisisPendiente -and -not $script:Trabajo) { Start-Analisis; return }
+    switch ($Sel) {
+        "TabPerfiles" {
+            if (-not $script:PerfilesVistos) { $script:PerfilesVistos = $true; $script:ProgramaCamaras = Find-ProgramaCamaras }
+            Update-EstadoPerfiles
+        }
+        "TabPrivacidad" { Update-VistaPrivacidad }
+        "TabArranque"   { if (-not $script:ArranqueCargado) { Start-ListaArranque } }
+        "TabProgramas"  { if (-not $script:ProgramasCargados) { Show-Instalados } }
+        "TabHistorial"  { Show-Historial }
+    }
+}
+$script:PerfilesVistos = $false
+
 # ---------------------------------------------------------------- Secciones plegables
 # Cada título de sección pasa a ser un desplegable con sus opciones dentro; solo se abren las principales.
 function Convert-Plegable($Panel, [string[]]$Abiertas = @()) {
@@ -3758,13 +5618,27 @@ function Update-FiltroAjustes {
 
 Convert-Plegable $script:UI.PanelAjustes @("Ajustes esenciales")
 Convert-Plegable $script:UI.PanelRendimiento @("Memoria RAM")
+Convert-Plegable $script:UI.PanelPrivacidad @("Verde: recomendado", "Amarillo: con cuidado")
+Convert-Plegable $script:UI.PanelProgramas @("Actualizaciones de programas", "Desinstalar a fondo")
 Convert-Plegable $script:UI.PanelSeguridad @("Revisión propia (sin antivirus)", "Buscar virus y revisar el sistema")
 Convert-Plegable $script:UI.PanelConfig
 Convert-Plegable $script:UI.PanelAyuda
 Update-FiltroAjustes
 # Abre siempre en Inicio (sin esto, la primera pestaña solo se elige al mostrarse la ventana)
 $script:UI.Pestanas.SelectedItem = $script:Ventana.FindName("TabInicio")
+if (-not $Prueba) {
+    # Al cambiar de tema se vuelve a la misma pestaña; o a la última usada, si se eligió en Configuración
+    $abrirEn = if ($script:Prefs.AbrirEn) { [string]$script:Prefs.AbrirEn } elseif ($script:Prefs.RecordarPestana) { [string]$script:Prefs.UltimaPestana } else { "" }
+    if ($script:Prefs.AbrirEn) { $script:Prefs.AbrirEn = ""; Save-Prefs }
+    if ($abrirEn) { Select-Pestana $abrirEn }
+}
 Update-BotonesPestana
+$script:UI.Pestanas.Add_SelectionChanged({
+    param($origen, $evento)
+    if ($evento.OriginalSource -ne $script:UI.Pestanas -or -not $script:Prefs.RecordarPestana) { return }
+    $nombreTab = [string]$script:UI.Pestanas.SelectedItem.Name
+    if ($nombreTab -and $nombreTab -ne $script:Prefs.UltimaPestana) { $script:Prefs.UltimaPestana = $nombreTab; Save-Prefs }
+})
 
 Escribir-Log "Optimizador iniciado. Registro: $global:ArchivoLog"
 if ($Prueba) {

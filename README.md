@@ -7,12 +7,19 @@ Optimizador de Windows en español, con aviso de riesgo en cada opción. Basado 
 
 Doble clic en `Iniciar-Optimizador.bat` y acepta el aviso de administrador. Ver `LEEME.txt`.
 
+O, sin descargar nada a mano, en PowerShell (siempre abre la última versión publicada en `main`):
+
+```powershell
+irm https://raw.githubusercontent.com/edainhg/Optimizador/main/instalar.ps1 | iex
+```
+
 ## Estructura
 
 | Ruta | Qué es |
 | --- | --- |
 | `OptimizadorES.ps1` | El optimizador (archivo generado: no editar a mano) |
 | `LiberarRAM.ps1` | Herramienta de consola para liberar memoria |
+| `instalar.ps1` | Lanzador para `irm ... \| iex`: descarga el optimizador y lo abre como administrador |
 | `fuente/` | Fuentes: `template.ps1` (interfaz y motor), `es.py` (traducciones y riesgos), `apps.py`, `extras.py`, `gen.py` |
 | `tests/` | Pruebas automáticas (Pester 5) |
 | `.github/workflows/pruebas.yml` | Ejecuta las pruebas en Windows en cada cambio |
