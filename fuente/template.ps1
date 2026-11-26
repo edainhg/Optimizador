@@ -2426,6 +2426,14 @@ $btnIrRam.Tag = $true
 $btnIrRam.Add_Click({ Invoke-AccionAnalisis "LiberarRAM" })
 $script:BotonesSeguridad += $btnIrRam
 [void]$filaBotonesIni.Children.Add($btnIrRam)
+$btnMineros = New-Object System.Windows.Controls.Button
+$btnMineros.Content = "Buscar mineros y virus (sin antivirus)"
+$btnMineros.Padding = "14,6"
+$btnMineros.Margin = "8,0,0,0"
+$btnMineros.Tag = $true
+$btnMineros.Add_Click({ Select-Pestana "TabSeguridad"; Start-Revision })
+$script:BotonesSeguridad += $btnMineros
+[void]$filaBotonesIni.Children.Add($btnMineros)
 [void]$pIni.Children.Add($filaBotonesIni)
 
 $script:TxtResumenAnalisis = New-Object System.Windows.Controls.TextBlock
@@ -3294,20 +3302,28 @@ Write-Output "Revisión terminada: $altos señal(es) importantes y $medios a rev
 
 $script:DetallesAcciones["Buscar mineros y programas sospechosos"] = "Es una revisión propia que NO usa el antivirus: busca las huellas que dejan los mineros y el malware común. Solo lee, no borra ni cambia nada. Tarda de 20 segundos a 2 minutos.`n`n1. Procesos con nombres o parámetros de minado (xmrig, nicehash, stratum+tcp, grupos de minado conocidos...).`n2. Qué procesos gastan mucho procesador durante 5 segundos y si están firmados.`n3. Programas sin firma ejecutándose desde Temp, Public o la raíz de AppData/ProgramData.`n4. Conexiones a los puertos que usan los grupos de minado.`n5. Programas de arranque con comandos ocultos, codificados o que descargan de Internet.`n6. Tareas programadas (fuera de las de Microsoft) con esos mismos trucos.`n7. Servicios sin firma fuera de 'Archivos de programa'.`n8. Exclusiones de Microsoft Defender y tareas ocultas de WMI.`n9. Archivo hosts que bloquee webs de antivirus o de Windows Update.`n`nCada resultado dice qué es, por qué es sospechoso y trae botones para abrir su carpeta, buscarlo en Internet o terminar el proceso. Que algo salga aquí no significa que sea un virus: es una pista para revisar."
 
+function Start-Revision {
+    if ($script:Trabajo) { return }
+    $global:Estado.Revision = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+    $script:PanelRevision.Children.Clear()
+    Start-Pasos -Pasos @(New-PasoScript -Nombre "Buscar mineros y programas sospechosos" -Codigo $script:codigoRevision) -Silencioso
+    if ($script:Trabajo) { $script:AlTerminar = { Show-Revision } }
+}
 $pS = $script:UI.PanelSeguridad
+$inicioRevision = $pS.Children.Count
 [void]$pS.Children.Add((New-Titulo "Revisión propia (sin antivirus)" "Busca mineros de criptomonedas y señales de malware por su cuenta, sin depender del antivirus instalado. No borra nada: te muestra lo sospechoso y tú decides."))
 New-TarjetaAccion -Panel $pS -Titulo "Buscar mineros y programas sospechosos" -TextoBoton "Revisar" -Riesgo "Bajo" `
     -Descripcion "Procesos que gastan mucho procesador sin firma, nombres y conexiones de minado, arranque, tareas programadas, servicios, exclusiones del antivirus y archivo hosts." `
     -Aviso "Puede tardar hasta 2 minutos. Mejor con los programas pesados cerrados, para que la medición del procesador sea fiable." `
-    -Accion {
-        $global:Estado.Revision = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
-        $script:PanelRevision.Children.Clear()
-        Start-Pasos -Pasos @(New-PasoScript -Nombre "Buscar mineros y programas sospechosos" -Codigo $script:codigoRevision) -Silencioso
-        if ($script:Trabajo) { $script:AlTerminar = { Show-Revision } }
-    }
+    -Accion { Start-Revision }
 $script:PanelRevision = New-Object System.Windows.Controls.StackPanel
 $script:PanelRevision.Margin = "0,0,0,8"
 [void]$pS.Children.Add($script:PanelRevision)
+# Se muestra al principio de Seguridad, justo después del estado del antivirus
+$elementosRevision = @(for ($i = $inicioRevision; $i -lt $pS.Children.Count; $i++) { $pS.Children[$i] })
+foreach ($el in $elementosRevision) { $pS.Children.Remove($el) }
+$posRevision = 2
+foreach ($el in $elementosRevision) { $pS.Children.Insert($posRevision, $el); $posRevision++ }
 
 $script:QueHacerRevision = @{
     Proceso   = "Qué hacer: si no lo reconoces, pulsa 'Terminar proceso', abre su carpeta y busca el nombre en Internet. Después haz un análisis con Safety Scanner (arriba)."

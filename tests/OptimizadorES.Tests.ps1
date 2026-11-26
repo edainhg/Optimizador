@@ -138,6 +138,8 @@ Describe "Carga completa en modo prueba" {
         { & ([scriptblock]::Create($script:codigoRevision)) | Out-Null } | Should -Not -Throw
         { Show-Revision } | Should -Not -Throw
         $script:PanelRevision.Children.Count | Should -BeGreaterThan 0
+        # Debe verse al principio de la pestaña Seguridad
+        $script:UI.PanelSeguridad.Children.IndexOf($script:PanelRevision) | Should -BeLessThan 6
     }
 
     It "La revisión detecta un comando de minado" {
