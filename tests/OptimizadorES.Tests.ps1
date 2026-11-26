@@ -152,6 +152,21 @@ Describe "Carga completa en modo prueba" {
         } finally { Stop-Process -Id $falso.Id -Force -ErrorAction SilentlyContinue }
     }
 
+    It "La revisión muestra la ruta del script oculto para poder abrirlo" {
+        $global:Estado.Revision = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+        $archivo = Join-Path $TestDrive "Sin título1.ps1"
+        Set-Content -LiteralPath $archivo -Value "Start-Sleep 60" -Encoding UTF8
+        $oculto = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", "`"$archivo`"" -PassThru
+        try {
+            Start-Sleep -Seconds 2
+            & ([scriptblock]::Create($script:codigoRevision)) | Out-Null
+            $h = @($global:Estado.Revision | Where-Object { $_.Pid -eq $oculto.Id })[0]
+            $h | Should -Not -BeNullOrEmpty
+            $h.Ruta | Should -Be $archivo
+            { Show-Revision } | Should -Not -Throw
+        } finally { Stop-Process -Id $oculto.Id -Force -ErrorAction SilentlyContinue }
+    }
+
     It "Los IDs de apps no se repiten" {
         $dup = $script:Apps | Group-Object Id | Where-Object Count -gt 1
         $dup | Should -BeNullOrEmpty

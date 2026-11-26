@@ -3162,7 +3162,11 @@ foreach ($p in $procs) {
     if ($nom -match "(?i)($nombresMineros)" -or $cmd -match $comandoMinero) {
         Add-Sospecha "Alto" "Proceso" "Posible minero de criptomonedas en ejecución: $nom" "Su nombre o sus parámetros son los típicos de un programa de minado (usa tu procesador o tarjeta gráfica para ganar criptomonedas para otro). Comando: $($cmd.Substring(0, [Math]::Min(200, $cmd.Length)))" ([string]$p.ExecutablePath) ([int]$p.ProcessId)
     } elseif ($cmd -match $comandoRaro -and $nom -match '(?i)^(powershell|pwsh|cmd|mshta|wscript|cscript|rundll32|regsvr32)\.exe$') {
-        Add-Sospecha "Medio" "Proceso" "Script oculto o codificado en ejecución ($nom)" "Hay un $nom con parámetros que suelen usar los programas maliciosos para esconderse (texto codificado, ventana oculta o descarga desde Internet). Algunos programas legítimos de empresa también lo hacen. Comando: $($cmd.Substring(0, [Math]::Min(200, $cmd.Length)))" "" ([int]$p.ProcessId)
+        $archivoScript = ""
+        if ($cmd -match '(?i)"([^"]+\.(ps1|vbs|vbe|js|jse|hta|bat|cmd|wsf))"') { $archivoScript = $Matches[1] }
+        elseif ($cmd -match '(?i)(\S+\.(ps1|vbs|vbe|js|jse|hta|bat|cmd|wsf))(\s|$)') { $archivoScript = $Matches[1] }
+        $cual = if ($archivoScript) { "'$(Split-Path $archivoScript -Leaf)'" } else { "un comando" }
+        Add-Sospecha "Medio" "Proceso" "Script oculto o codificado en ejecución: $cual ($nom)" "Hay un $nom con parámetros que suelen usar los programas maliciosos para esconderse (texto codificado, ventana oculta o descarga desde Internet). Algunos programas legítimos de empresa también lo hacen. Comando: $($cmd.Substring(0, [Math]::Min(200, $cmd.Length)))" $archivoScript ([int]$p.ProcessId)
     }
 }
 
@@ -3400,6 +3404,9 @@ function Show-Revision {
             $acciones = New-Object System.Collections.ArrayList
             if ($h.Ruta -and (Test-Path -LiteralPath $h.Ruta)) {
                 [void]$acciones.Add(@("Abrir ubicación", [scriptblock]::Create("Start-Process explorer.exe -ArgumentList '/select,`"$($h.Ruta -replace "'", "''")`"'")))
+            }
+            if ($h.Ruta -match '(?i)\.(ps1|vbs|vbe|js|jse|hta|bat|cmd|wsf)$' -and (Test-Path -LiteralPath $h.Ruta)) {
+                [void]$acciones.Add(@("Ver el script (Bloc de notas)", [scriptblock]::Create("Start-Process notepad.exe -ArgumentList '`"$($h.Ruta -replace "'", "''")`"'")))
             }
             $buscar = if ($h.Ruta) { Split-Path $h.Ruta -Leaf } else { $h.Titulo }
             [void]$acciones.Add(@("Buscar en Internet", [scriptblock]::Create("Start-Process ('https://www.bing.com/search?q=' + [uri]::EscapeDataString('$($buscar -replace "'", "''")' + ' qué es'))")))
