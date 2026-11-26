@@ -3762,6 +3762,9 @@ Convert-Plegable $script:UI.PanelSeguridad @("Revisión propia (sin antivirus)",
 Convert-Plegable $script:UI.PanelConfig
 Convert-Plegable $script:UI.PanelAyuda
 Update-FiltroAjustes
+# Abre siempre en Inicio (sin esto, la primera pestaña solo se elige al mostrarse la ventana)
+$script:UI.Pestanas.SelectedItem = $script:Ventana.FindName("TabInicio")
+Update-BotonesPestana
 
 Escribir-Log "Optimizador iniciado. Registro: $global:ArchivoLog"
 if ($Prueba) {
