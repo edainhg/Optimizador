@@ -346,7 +346,7 @@ Describe "Mejoras: perfiles, privacidad, arranque, programas, limpieza, priorida
         $r2 = ConvertFrom-TablaWinget -Texto $en
         $r2.Count | Should -Be 1
         $r2[0].Id | Should -Be "Notepad++.Notepad++"
-        @(ConvertFrom-TablaWinget -Texto "No se encontró ninguna actualización disponible.").Count | Should -Be 0
+        (ConvertFrom-TablaWinget -Texto "No se encontró ninguna actualización disponible.").Count | Should -Be 0
     }
 
     It "Muestra los programas con actualización con su casilla" {
@@ -365,8 +365,8 @@ Describe "Mejoras: perfiles, privacidad, arranque, programas, limpieza, priorida
             $r = Find-Restos -Nombre "OptES Prueba App 1.2.3 (x64)" -Editor "OptES Corp, Inc."
             @($r | Where-Object { $_.Ruta -eq $carpeta }).Count | Should -Be 1
             @($r | Where-Object { $_.Tipo -eq "Registro" }).Count | Should -Be 1
-            @(Find-Restos -Nombre "Microsoft").Count | Should -Be 0
-            @(Find-Restos -Nombre "Intel 1.0").Count | Should -Be 0
+            (Find-Restos -Nombre "Microsoft").Count | Should -Be 0
+            (Find-Restos -Nombre "Intel 1.0").Count | Should -Be 0
         } finally { Remove-Item -Path "HKCU:\Software\OptES Prueba App" -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
