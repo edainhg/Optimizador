@@ -591,6 +591,18 @@ $xaml = @'
         </Setter.Value>
       </Setter>
     </Style>
+    <Style x:Key="Grupo" TargetType="TabItem">
+      <Setter Property="IsEnabled" Value="False"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TabItem">
+            <TextBlock Text="{Binding Header, RelativeSource={RelativeSource TemplatedParent}}" Margin="12,14,0,4"
+                       FontSize="11" FontWeight="SemiBold" Foreground="#9CA3AF"/>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style TargetType="TabControl">
       <Setter Property="Template">
         <Setter.Value>
@@ -602,7 +614,9 @@ $xaml = @'
                   <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
                 <Border Background="#FFFFFF" BorderBrush="#E2E6EC" BorderThickness="0,0,1,0" CornerRadius="10,0,0,10">
-                  <StackPanel IsItemsHost="True" Margin="8,12"/>
+                  <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel IsItemsHost="True" Margin="8,4,8,12"/>
+                  </ScrollViewer>
                 </Border>
                 <ContentPresenter Grid.Column="1" ContentSource="SelectedContent" Margin="4"/>
               </Grid>
@@ -645,6 +659,7 @@ $xaml = @'
           <StackPanel x:Name="PanelInicio" Margin="14"/>
         </ScrollViewer>
       </TabItem>
+      <TabItem Header="OPTIMIZAR" Style="{StaticResource Grupo}"/>
       <TabItem x:Name="TabAjustes" Header="Ajustes" Tag="&#xE713;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel x:Name="PanelAjustes" Margin="12"/>
@@ -659,6 +674,12 @@ $xaml = @'
           </StackPanel>
         </ScrollViewer>
       </TabItem>
+      <TabItem x:Name="TabRendimiento" Header="RAM y disco" Tag="&#xE9D9;">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelRendimiento" Margin="14"/>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="PROGRAMAS Y CONTROLADORES" Style="{StaticResource Grupo}"/>
       <TabItem x:Name="TabApps" Header="Apps" Tag="&#xE71D;">
         <DockPanel>
           <WrapPanel DockPanel.Dock="Top" Margin="12,10,12,4">
@@ -679,21 +700,12 @@ $xaml = @'
           </ScrollViewer>
         </DockPanel>
       </TabItem>
-      <TabItem x:Name="TabRendimiento" Header="RAM y disco" Tag="&#xE9D9;">
-        <ScrollViewer VerticalScrollBarVisibility="Auto">
-          <StackPanel x:Name="PanelRendimiento" Margin="14"/>
-        </ScrollViewer>
-      </TabItem>
       <TabItem x:Name="TabControladores" Header="Controladores" Tag="&#xE950;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel x:Name="PanelControladores" Margin="14"/>
         </ScrollViewer>
       </TabItem>
-      <TabItem x:Name="TabConfig" Header="Configuración" Tag="&#xE912;">
-        <ScrollViewer VerticalScrollBarVisibility="Auto">
-          <StackPanel x:Name="PanelConfig" Margin="12"/>
-        </ScrollViewer>
-      </TabItem>
+      <TabItem Header="PROTEGER Y REPARAR" Style="{StaticResource Grupo}"/>
       <TabItem x:Name="TabSeguridad" Header="Seguridad" Tag="&#xEA18;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel x:Name="PanelSeguridad" Margin="12"/>
@@ -707,6 +719,12 @@ $xaml = @'
       <TabItem x:Name="TabInforme" Header="Informe del equipo" Tag="&#xE9F9;">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel x:Name="PanelInforme" Margin="12"/>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="SISTEMA" Style="{StaticResource Grupo}"/>
+      <TabItem x:Name="TabConfig" Header="Configuración" Tag="&#xE912;">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="PanelConfig" Margin="12"/>
         </ScrollViewer>
       </TabItem>
       <TabItem x:Name="TabAyuda" Header="Riesgos y ayuda" Tag="&#xE897;">
@@ -968,6 +986,8 @@ function New-Titulo {
     param([string]$Texto, [string]$Subtitulo)
     $p = New-Object System.Windows.Controls.StackPanel
     $p.Margin = "0,8,0,8"
+    $p.Uid = "Titulo"
+    $p.Tag = $Texto
     $t = New-Object System.Windows.Controls.TextBlock
     $t.Text = $Texto
     $t.FontSize = 17
@@ -1875,17 +1895,19 @@ function Update-VistaAjustes {
             $info.Borde.BorderBrush = Get-Pincel "#86EFAC"
             if ($ocultar) {
                 $c.IsChecked = $false
-                $info.Borde.Visibility = "Collapsed"
+                $info.Oculto = $true
                 $ocultos++
             } else {
-                $info.Borde.Visibility = "Visible"
+                $info.Oculto = $false
             }
         } else {
             $info.Estado.Visibility = "Collapsed"
             $info.Borde.BorderBrush = Get-Pincel "#E5E7EB"
-            $info.Borde.Visibility = "Visible"
+            $info.Oculto = $false
         }
     }
+    if (Get-Command Update-FiltroAjustes -ErrorAction SilentlyContinue) { Update-FiltroAjustes }
+    else { foreach ($c in $script:CasillasAjustes) { $i2 = $script:InfoAjuste[$c.Tag.Key]; if ($i2) { $i2.Borde.Visibility = if ($i2.Oculto) { "Collapsed" } else { "Visible" } } } }
     $script:TxtOcultos.Text = if ($ocultos) { "$ocultos ajuste(s) ya aplicados están ocultos. Quita la marca de arriba para verlos o deshacerlos." } else { "" }
     $script:TxtOcultos.Visibility = if ($ocultos) { "Visible" } else { "Collapsed" }
 }
@@ -3326,7 +3348,7 @@ $script:PanelRevision.Margin = "0,0,0,8"
 # Se muestra al principio de Seguridad, justo después del estado del antivirus
 $elementosRevision = @(for ($i = $inicioRevision; $i -lt $pS.Children.Count; $i++) { $pS.Children[$i] })
 foreach ($el in $elementosRevision) { $pS.Children.Remove($el) }
-$posRevision = 2
+$posRevision = 0
 foreach ($el in $elementosRevision) { $pS.Children.Insert($posRevision, $el); $posRevision++ }
 
 $script:QueHacerRevision = @{
@@ -3654,6 +3676,92 @@ $script:Ventana.Add_Closing({
         $evento.Cancel = $true
     }
 })
+
+# ---------------------------------------------------------------- Secciones plegables
+# Cada título de sección pasa a ser un desplegable con sus opciones dentro; solo se abren las principales.
+function Convert-Plegable($Panel, [string[]]$Abiertas = @()) {
+    $hijos = @($Panel.Children)
+    $titulos = @($hijos | Where-Object { $_.Uid -eq "Titulo" })
+    if ($titulos.Count -lt 2) { return }
+    $Panel.Children.Clear()
+    $actual = $null
+    $primero = $true
+    foreach ($h in $hijos) {
+        if ($h.Uid -eq "Titulo") {
+            $exp = New-Object System.Windows.Controls.Expander
+            $exp.Margin = "0,4,0,6"
+            $exp.Tag = [string]$h.Tag
+            $cab = New-Object System.Windows.Controls.StackPanel
+            $cab.Margin = "4,2,0,2"
+            $txtCab = New-Object System.Windows.Controls.TextBlock
+            $txtCab.Text = [string]$h.Tag
+            $txtCab.FontSize = 16
+            $txtCab.FontWeight = "SemiBold"
+            $txtCab.Foreground = Get-Pincel "#111827"
+            [void]$cab.Children.Add($txtCab)
+            $sub = @($h.Children)[1]
+            $txtSub = New-Object System.Windows.Controls.TextBlock
+            $txtSub.TextWrapping = "Wrap"
+            $txtSub.Foreground = Get-Pincel "#6B7280"
+            $txtSub.Text = if ($sub) { [string]$sub.Text } else { "" }
+            [void]$cab.Children.Add($txtSub)
+            $exp.Header = $cab
+            $contenido = New-Object System.Windows.Controls.StackPanel
+            $contenido.Margin = "0,8,0,0"
+            $exp.Content = $contenido
+            $exp.IsExpanded = if ($Abiertas.Count) { $Abiertas -contains [string]$h.Tag } else { $primero }
+            $primero = $false
+            $exp.Uid = "Seccion"
+            [void]$Panel.Children.Add($exp)
+            $actual = $contenido
+        } elseif ($actual) {
+            [void]$actual.Children.Add($h)
+        } else {
+            [void]$Panel.Children.Add($h)
+        }
+    }
+    # Cuántas opciones hay dentro de cada sección
+    foreach ($exp in @($Panel.Children | Where-Object { $_.Uid -eq "Seccion" })) {
+        $n = @($exp.Content.Children | Where-Object { $_ -is [System.Windows.Controls.Border] }).Count
+        if ($n) { $exp.Header.Children[0].Text = "$($exp.Tag)   ($n)" }
+    }
+}
+
+# Buscador de la pestaña Ajustes
+$filaBuscar = New-Object System.Windows.Controls.DockPanel
+$filaBuscar.Margin = "0,0,0,8"
+$lblBuscar = New-Object System.Windows.Controls.TextBlock
+$lblBuscar.Text = "Buscar ajuste:"
+$lblBuscar.VerticalAlignment = "Center"
+$lblBuscar.Margin = "0,0,8,0"
+[System.Windows.Controls.DockPanel]::SetDock($lblBuscar, "Left")
+[void]$filaBuscar.Children.Add($lblBuscar)
+$script:TxtBuscarAjuste = New-Object System.Windows.Controls.TextBox
+$script:TxtBuscarAjuste.ToolTip = "Escribe parte del nombre o la descripción (por ejemplo: telemetría, Cortana, ratón)"
+$script:TxtBuscarAjuste.Add_TextChanged({ Update-FiltroAjustes })
+[void]$filaBuscar.Children.Add($script:TxtBuscarAjuste)
+$script:UI.PanelAjustes.Children.Insert(0, $filaBuscar)
+
+function Update-FiltroAjustes {
+    $texto = ([string]$script:TxtBuscarAjuste.Text).Trim()
+    foreach ($c in $script:CasillasAjustes) {
+        $it = $c.Tag
+        $info = $script:InfoAjuste[$it.Key]
+        if (-not $info) { continue }
+        $coincide = (-not $texto) -or ("$($it.Nombre) $($it.Descripcion) $($it.Aviso)" -like "*$texto*")
+        $info.Borde.Visibility = if ($coincide -and -not $info.Oculto) { "Visible" } else { "Collapsed" }
+    }
+    if ($texto) {
+        foreach ($exp in @($script:UI.PanelAjustes.Children | Where-Object { $_.Uid -eq "Seccion" })) { $exp.IsExpanded = $true }
+    }
+}
+
+Convert-Plegable $script:UI.PanelAjustes @("Ajustes esenciales")
+Convert-Plegable $script:UI.PanelRendimiento @("Memoria RAM")
+Convert-Plegable $script:UI.PanelSeguridad @("Revisión propia (sin antivirus)", "Buscar virus y revisar el sistema")
+Convert-Plegable $script:UI.PanelConfig
+Convert-Plegable $script:UI.PanelAyuda
+Update-FiltroAjustes
 
 Escribir-Log "Optimizador iniciado. Registro: $global:ArchivoLog"
 if ($Prueba) {

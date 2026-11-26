@@ -138,8 +138,10 @@ Describe "Carga completa en modo prueba" {
         { & ([scriptblock]::Create($script:codigoRevision)) | Out-Null } | Should -Not -Throw
         { Show-Revision } | Should -Not -Throw
         $script:PanelRevision.Children.Count | Should -BeGreaterThan 0
-        # Debe verse al principio de la pestaña Seguridad
-        $script:UI.PanelSeguridad.Children.IndexOf($script:PanelRevision) | Should -BeLessThan 6
+        # Debe ser la primera sección de la pestaña Seguridad
+        $primera = @($script:UI.PanelSeguridad.Children | Where-Object { $_.Uid -eq "Seccion" })[0]
+        $primera.Tag | Should -Be "Revisión propia (sin antivirus)"
+        $primera.IsExpanded | Should -BeTrue
     }
 
     It "La revisión detecta un comando de minado" {
@@ -165,6 +167,27 @@ Describe "Carga completa en modo prueba" {
             $h.Ruta | Should -Be $archivo
             { Show-Revision } | Should -Not -Throw
         } finally { Stop-Process -Id $oculto.Id -Force -ErrorAction SilentlyContinue }
+    }
+
+    It "Las pestañas largas están en secciones plegables y solo las principales abiertas" {
+        $secciones = @($script:UI.PanelAjustes.Children | Where-Object { $_.Uid -eq "Seccion" })
+        $secciones.Count | Should -BeGreaterOrEqual 2
+        @($secciones | Where-Object { $_.IsExpanded }).Count | Should -Be 1
+        @($script:UI.PanelRendimiento.Children | Where-Object { $_.Uid -eq "Seccion" }).Count | Should -BeGreaterOrEqual 3
+    }
+
+    It "El menú lateral está agrupado y los grupos no se pueden seleccionar" {
+        $grupos = @($script:UI.Pestanas.Items | Where-Object { -not $_.Name })
+        $grupos.Count | Should -BeGreaterOrEqual 3
+        foreach ($g in $grupos) { $g.IsEnabled | Should -BeFalse }
+        $script:UI.Pestanas.SelectedItem.Name | Should -Be "TabInicio"
+    }
+
+    It "El buscador de Ajustes filtra las opciones" {
+        $script:TxtBuscarAjuste.Text = "zzzz-no-existe"
+        @($script:CasillasAjustes | Where-Object { $script:InfoAjuste[$_.Tag.Key].Borde.Visibility -eq "Visible" }).Count | Should -Be 0
+        $script:TxtBuscarAjuste.Text = ""
+        @($script:CasillasAjustes | Where-Object { $script:InfoAjuste[$_.Tag.Key].Borde.Visibility -eq "Visible" }).Count | Should -BeGreaterThan 0
     }
 
     It "Los IDs de apps no se repiten" {
